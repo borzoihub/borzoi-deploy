@@ -348,13 +348,19 @@ info "Installing borzoi-ecr-login wrapper script..."
 # symlink into /usr/bin so docker can always find it regardless of the
 # shell's PATH (non-login SSH sessions, systemd-spawned contexts, etc.
 # sometimes miss /usr/local/bin).
+#
+# We use an explicit mode 0755 (not chmod +x) because the umask 077 set
+# earlier in this script for .env propagates through `sudo tee`, which
+# would otherwise create the file as 0600 — making it unreadable/
+# unexecutable by the docker user and producing a misleading "not in
+# PATH" error from docker.
 sudo tee /usr/local/bin/docker-credential-borzoi-ecr-login >/dev/null <<'WRAPPER'
 #!/bin/sh
 # Pins AWS_PROFILE so the ECR credential helper uses the borzoi-specific
 # profile in ~/.aws/credentials, not whatever [default] happens to be.
 AWS_PROFILE=borzoi-ecr exec docker-credential-ecr-login "$@"
 WRAPPER
-sudo chmod +x /usr/local/bin/docker-credential-borzoi-ecr-login
+sudo chmod 0755 /usr/local/bin/docker-credential-borzoi-ecr-login
 sudo ln -sf /usr/local/bin/docker-credential-borzoi-ecr-login \
             /usr/bin/docker-credential-borzoi-ecr-login
 
