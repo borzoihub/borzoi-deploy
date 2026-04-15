@@ -344,6 +344,10 @@ if ! command -v docker-credential-ecr-login >/dev/null 2>&1; then
 fi
 
 info "Installing borzoi-ecr-login wrapper script..."
+# Install to /usr/local/bin (FHS convention for admin scripts) AND
+# symlink into /usr/bin so docker can always find it regardless of the
+# shell's PATH (non-login SSH sessions, systemd-spawned contexts, etc.
+# sometimes miss /usr/local/bin).
 sudo tee /usr/local/bin/docker-credential-borzoi-ecr-login >/dev/null <<'WRAPPER'
 #!/bin/sh
 # Pins AWS_PROFILE so the ECR credential helper uses the borzoi-specific
@@ -351,6 +355,23 @@ sudo tee /usr/local/bin/docker-credential-borzoi-ecr-login >/dev/null <<'WRAPPER
 AWS_PROFILE=borzoi-ecr exec docker-credential-ecr-login "$@"
 WRAPPER
 sudo chmod +x /usr/local/bin/docker-credential-borzoi-ecr-login
+sudo ln -sf /usr/local/bin/docker-credential-borzoi-ecr-login \
+            /usr/bin/docker-credential-borzoi-ecr-login
+
+# Verify both the wrapper and the underlying helper resolve before we
+# try `docker compose pull` — otherwise the pull failure is opaque.
+if ! command -v docker-credential-borzoi-ecr-login >/dev/null 2>&1; then
+  err "Wrapper not on PATH after install. PATH=$PATH"
+  err "Expected at /usr/local/bin/docker-credential-borzoi-ecr-login and /usr/bin/..."
+  ls -la /usr/local/bin/docker-credential-borzoi-ecr-login \
+         /usr/bin/docker-credential-borzoi-ecr-login 2>&1 >&2 || true
+  exit 1
+fi
+if ! command -v docker-credential-ecr-login >/dev/null 2>&1; then
+  err "amazon-ecr-credential-helper is not installed correctly (docker-credential-ecr-login missing from PATH)."
+  err "Try: sudo apt-get install --reinstall amazon-ecr-credential-helper"
+  exit 1
+fi
 
 info "Configuring docker to use the borzoi ECR credential helper..."
 mkdir -p "$HOME/.docker"
