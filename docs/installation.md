@@ -15,8 +15,7 @@ End-to-end walkthrough from blank SD card to a working Borzoi login.
 
 **Credentials packet** (from [customer-onboarding.md](customer-onboarding.md)):
 - ECR pull credentials (shared across installs)
-- App AWS credentials (unique to this customer)
-- S3 bucket name, SES sender, bootstrap admin email
+- Bootstrap admin email
 
 **Network**:
 - A DNS record pointing the chosen domain at the Pi's public/LAN IP
@@ -118,16 +117,18 @@ You'll be prompted for the following, in order:
 | `ECR Access Key ID` | shared installer access key | yes |
 | `ECR Secret Access Key` | shared installer secret | yes (hidden) |
 | `ECR registry URL` | auto-derived if aws-cli is installed; else e.g. `123456789012.dkr.ecr.eu-north-1.amazonaws.com` | derived or manual |
-| `App AWS region` | customer's region | yes |
-| `App AWS Access Key ID` | customer's app access key | yes |
-| `App AWS Secret Access Key` | customer's app secret | yes (hidden) |
-| `S3 bucket` | e.g. `borzoi-acme-heating` | yes |
-| `SES sender address` | e.g. `no-reply@acme.example` | yes |
 | `Bootstrap admin email` | e.g. `admin@acme.example` | yes |
+
+> **Note on AWS app credentials**: the backend has code paths for S3
+> (file uploads) and SES (account emails) but they are not used by the
+> product today. `setup.sh` writes placeholder values to `.env` to
+> satisfy the entrypoint's env-var check. If those features get wired
+> in later, edit `.env` with real AWS credentials and restart the
+> backend.
 
 What happens after the prompts:
 
-1. **Credential validation** — if `aws-cli` is installed, both cred sets are tested with `sts get-caller-identity`. If validation fails, you can re-enter.
+1. **Credential validation** — if `aws-cli` is installed, the ECR creds are tested with `sts get-caller-identity`. If validation fails, you can re-enter.
 2. **Secret generation** — DB password (32 chars), JWT secret (48 chars), bootstrap admin password (24 chars) are auto-generated.
 3. **.env written** to `/opt/borzoi/.env`, mode 600.
 4. **Directories created** — `data/postgres`, `certbot/conf`, `certbot/www`, `nginx/templates`.

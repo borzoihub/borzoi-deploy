@@ -1,8 +1,60 @@
 # Customer onboarding
 
-For every new customer Pi, generate a unique set of "app" AWS credentials and assemble a credentials packet to hand off. The shared ECR installer credentials are reused across all customers (see [operator-setup.md](operator-setup.md) step 5).
+Per-install checklist for the operator. In today's product, the only AWS resource the Pi actually authenticates against is ECR — and the ECR pull credentials are shared across all customer installs (see [operator-setup.md § 5](operator-setup.md#5-create-the-shared-ecr-pull-iam-user)). So per-customer onboarding is light.
 
-## 1. Create the customer's S3 bucket
+## Why there's no per-customer IAM user today
+
+The backend has code paths for S3 (file uploads) and SES (account emails) but neither feature is used by the product. The install writes placeholder AWS credentials into `.env` to satisfy env-var validation — no actual AWS calls are made with them.
+
+If/when S3 or SES features are wired in later, each customer will need an IAM user with policies scoped to their bucket + SES domain. That setup has been captured in the [Future: per-customer AWS setup](#future-per-customer-aws-setup) section below so the procedure isn't lost.
+
+## 1. Choose a domain
+
+Pick the public hostname the customer will use (e.g. `borzoi.acme.example`). They (or you) add an A record pointing at the Pi's public IP.
+
+## 2. Assemble the credentials packet
+
+Text file to hand to the installer. Delete from your machine after delivery; keep only a secure copy in your password manager.
+
+```
+================================================================
+Borzoi installation credentials — KEEP SECRET
+================================================================
+
+Customer:         Acme Heating
+Public domain:    borzoi.acme.example
+Pi hardware:      Raspberry Pi 5, 8GB
+
+─── ECR pull credentials (shared installer — same for all sites) ───
+ECR region:       eu-north-1
+ECR registry:     123456789012.dkr.ecr.eu-north-1.amazonaws.com
+ECR access key:   AKIA...
+ECR secret key:   ...
+
+─── Bootstrap admin ───
+Admin email:      admin@acme.example
+(password is auto-generated during setup.sh and printed once)
+================================================================
+```
+
+## 3. Hand off
+
+Send the packet to the installer (or the customer if they're self-installing). They'll use it during the [installation](installation.md) step.
+
+## Revocation
+
+If a Pi is stolen, decommissioned, or compromised:
+
+- **Single compromised install**: there's nothing customer-specific to revoke today beyond the bootstrap admin password (which is installation-specific anyway). Wipe the Pi and reinstall.
+- **Shared ECR installer compromised**: rotate the installer IAM user's credentials globally and push updates to every customer Pi (see [operator-setup.md § 7](operator-setup.md#7-rotation-cadence)).
+
+---
+
+## Future: per-customer AWS setup
+
+**Only perform these steps if/when the backend starts using S3 or SES in earnest.** Today they are skipped.
+
+### S3 bucket
 
 ```bash
 CUSTOMER=acme-heating
@@ -13,25 +65,27 @@ aws s3api create-bucket \
   --region $AWS_REGION \
   --create-bucket-configuration LocationConstraint=$AWS_REGION
 
-# Block all public access
 aws s3api put-public-access-block \
   --bucket borzoi-$CUSTOMER \
   --public-access-block-configuration \
     "BlockPublicAcls=true,IgnorePublicAcls=true,BlockPublicPolicy=true,RestrictPublicBuckets=true"
 ```
 
-## 2. Verify the customer's SES sender
+### SES sender verification
 
-SES needs the sender domain (or email address) verified before it can send. Either:
+Either domain or individual email address:
 
-- **Domain verification** (preferred if the customer has their own domain): `aws ses verify-domain-identity --domain example.com`, then the customer adds the returned TXT record to DNS.
-- **Email verification** (simpler for initial install): `aws ses verify-email-identity --email-address no-reply@customer.example`, customer clicks the confirmation link.
+```bash
+aws ses verify-domain-identity --domain customer.example
+# Customer adds the returned TXT record to DNS
 
-If your SES account is still in the sandbox, also verify **every recipient address** you'll send to (admin emails, etc.) until you request production access.
+# or for a single address:
+aws ses verify-email-identity --email-address no-reply@customer.example
+```
 
-## 3. Create the app IAM user
+If the SES account is still in the sandbox, verify every recipient too, or request production access.
 
-One IAM user per customer. Pattern: `borzoi-app-$CUSTOMER`.
+### Per-customer IAM user
 
 ```bash
 CUSTOMER=acme-heating
@@ -48,12 +102,7 @@ aws iam put-user-policy \
     {
       "Sid": "S3",
       "Effect": "Allow",
-      "Action": [
-        "s3:GetObject",
-        "s3:PutObject",
-        "s3:DeleteObject",
-        "s3:ListBucket"
-      ],
+      "Action": ["s3:GetObject","s3:PutObject","s3:DeleteObject","s3:ListBucket"],
       "Resource": [
         "arn:aws:s3:::borzoi-$CUSTOMER",
         "arn:aws:s3:::borzoi-$CUSTOMER/*"
@@ -73,54 +122,30 @@ EOF
 aws iam create-access-key --user-name borzoi-app-$CUSTOMER
 ```
 
-Save the access key ID and secret — these go in the credentials packet.
+### Update `.env` on the Pi
 
-## 4. Assemble the credentials packet
+Replace the placeholder values:
 
-Prepare this text file for the customer (or the installer going on-site). Delete it from your machine after delivery; keep only a secure copy in your password manager.
+```bash
+cd /opt/borzoi
+# Edit .env:
+AWS_ACCESS_KEY_ID=AKIA...          # real app key
+AWS_SECRET_ACCESS_KEY=...
+S3_BUCKET=borzoi-acme-heating
+SES_SENDER=no-reply@acme.example
 
-```
-================================================================
-Borzoi installation credentials — KEEP SECRET
-================================================================
-
-Customer:         Acme Heating
-Public domain:    borzoi.acme.example
-Pi hardware:      Raspberry Pi 5, 8GB
-
-─── ECR pull credentials (shared installer — same for all sites) ───
-ECR region:       eu-north-1
-ECR access key:   AKIA...
-ECR secret key:   ...
-
-─── App AWS credentials (unique to this customer) ───
-AWS region:       eu-north-1
-Access key ID:    AKIA...
-Secret key:       ...
-S3 bucket:        borzoi-acme-heating
-SES sender:       no-reply@acme.example
-
-─── Bootstrap admin (the customer picks the email; password is generated by setup.sh) ───
-Admin email:      admin@acme.example
-================================================================
+docker compose restart backend
 ```
 
-## 5. Hand off
+### Revocation (future)
 
-Forward this packet to the installer (or the customer if they're self-installing). They'll use it during the [installation](installation.md) step.
-
-## Revocation
-
-If a Pi is stolen, decommissioned, or compromised, revoke **only** that customer's IAM user:
+When the per-customer IAM user exists:
 
 ```bash
 aws iam list-access-keys --user-name borzoi-app-$CUSTOMER
 aws iam delete-access-key --user-name borzoi-app-$CUSTOMER --access-key-id AKIA...
-# Optionally delete the user and its inline policy:
 aws iam delete-user-policy --user-name borzoi-app-$CUSTOMER --policy-name borzoi-app
 aws iam delete-user --user-name borzoi-app-$CUSTOMER
 ```
 
-The **shared ECR installer** is not touched — other customers are unaffected.
-
-If the shared ECR installer credentials are compromised, rotate them globally (see [operator-setup.md § 7](operator-setup.md#7-rotation-cadence)).
+Other customers are unaffected.

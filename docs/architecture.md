@@ -18,17 +18,17 @@
 │                        ${ECR_REGISTRY}/borzoi-frontend:${FRONTEND_TAG}│
 │                                                                       │
 └───────────────────────────────────────────────────────────────────────┘
-                            ▲                    ▲
-                            │                    │
-                    ECR pull creds       App AWS creds
-                    (shared installer)   (customer-specific)
-                            │                    │
-                            ▼                    ▼
-                      ┌──────────┐        ┌───────────┐
-                      │   ECR    │        │  S3 + SES │
-                      │ (your    │        │(customer's│
-                      │  account)│        │  resources│
-                      └──────────┘        └───────────┘
+                            ▲
+                            │
+                    ECR pull creds
+                    (shared installer)
+                            │
+                            ▼
+                      ┌──────────┐
+                      │   ECR    │
+                      │ (your    │
+                      │  account)│
+                      └──────────┘
 ```
 
 ## Containers
@@ -65,15 +65,13 @@ The Pi holds **two AWS credential sets** which never cross over:
 
 A wrapper script at `/usr/local/bin/docker-credential-borzoi-ecr-login` pins `AWS_PROFILE=borzoi-ecr` before exec'ing the real `docker-credential-ecr-login`. This ensures docker auth never accidentally reads from `[default]` or any other profile that might be present on the host.
 
-### 2. App AWS credentials — per-customer
+### 2. App AWS credentials — placeholder today
 
-- **Scope**: S3 on the customer's bucket + SES send
-- **Stored**: `.env` (as `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY`)
-- **Used by**: backend container (via env_file) for S3 uploads and outbound email
-- **Unique per customer** — each customer gets their own IAM user
-- **Cost of leakage**: attacker can read/write that customer's S3 + send email from their SES sender
+The backend reads `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `S3_BUCKET`, `SES_SENDER`, and `AWS_REGION` from `.env` at startup. These feed `StorageService` (S3) and `EmailService` (SES) initialization. Neither service is currently used by any product feature — uploads, password-reset emails, and verification emails are all dormant code paths.
 
-The two cred sets are prompted for separately by `setup.sh` and stored in separate locations. The backend container never sees the ECR creds; the docker daemon never sees the app creds.
+`setup.sh` writes placeholder values for these so the entrypoint's env-var validation passes. The backend successfully initializes the AWS SDK clients but never actually makes an API call against AWS with them.
+
+If/when S3 or SES become active in the product, each customer needs a per-customer IAM user scoped to their resources; edit `.env` with real credentials and restart the backend. The setup procedure is captured in [customer-onboarding.md § Future: per-customer AWS setup](customer-onboarding.md#future-per-customer-aws-setup).
 
 ## What lives on the Pi
 

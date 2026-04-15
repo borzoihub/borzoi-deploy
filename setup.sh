@@ -128,17 +128,18 @@ if [ "$HAS_AWS_CLI" = "1" ]; then
 fi
 ECR_REGISTRY=$(ask "ECR registry URL" "$ECR_REGISTRY_DEFAULT")
 
-# ---- Application AWS credentials (S3 + SES, customer-specific) ----
-echo "" >&2
-echo "Application AWS credentials — used by the backend container for S3" >&2
-echo "(file storage) and SES (outbound email). Distinct from the ECR pull" >&2
-echo "credentials above." >&2
-echo "" >&2
-AWS_REGION=$(ask "App AWS region" "eu-north-1")
-AWS_ACCESS_KEY_ID=$(ask "App AWS Access Key ID" "")
-AWS_SECRET_ACCESS_KEY=$(ask_secret "App AWS Secret Access Key")
-S3_BUCKET=$(ask "S3 bucket (for file storage)" "")
-SES_SENDER=$(ask "SES sender address" "no-reply@$BORZOI_DOMAIN")
+# ---- Application AWS credentials (S3 + SES) ----
+# The backend has code paths for S3 (file uploads) and SES (account
+# emails) but they are currently unused in the product. Placeholders
+# satisfy the entrypoint's env-var validation; the backend never
+# actually authenticates against AWS with these. When/if S3 or SES
+# features get wired into the product, edit .env with real creds and
+# restart the backend.
+AWS_REGION="${AWS_REGION:-eu-north-1}"
+AWS_ACCESS_KEY_ID="AKIA-unused-placeholder"
+AWS_SECRET_ACCESS_KEY="unused-placeholder-secret"
+S3_BUCKET="borzoi-unused"
+SES_SENDER="no-reply@$BORZOI_DOMAIN"
 
 BORZOI_ADMIN_EMAIL=$(ask "Bootstrap admin email" "")
 
@@ -162,6 +163,9 @@ if [ "$HAS_AWS_CLI" = "1" ]; then
     ECR_AWS_SECRET_ACCESS_KEY=$(ask_secret "ECR Secret Access Key")
   done
 
+  # App AWS creds are placeholders — skip validation. Re-enable if/when
+  # S3 or SES features become active in the product.
+  if false; then
   info "Validating app AWS credentials..."
   while :; do
     if AWS_ACCESS_KEY_ID="$AWS_ACCESS_KEY_ID" \
@@ -177,6 +181,7 @@ if [ "$HAS_AWS_CLI" = "1" ]; then
     AWS_ACCESS_KEY_ID=$(ask "App AWS Access Key ID" "$AWS_ACCESS_KEY_ID")
     AWS_SECRET_ACCESS_KEY=$(ask_secret "App AWS Secret Access Key")
   done
+  fi
 else
   info "aws-cli not installed — skipping credential validation."
 fi

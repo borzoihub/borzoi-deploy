@@ -32,17 +32,17 @@ The rest of this README is a quick reference. Start with [`docs/installation.md`
 - `sudo` access (used to install the ECR credential helper)
 - Optional but recommended: `aws-cli` — when present, `setup.sh`
   validates your AWS credentials and auto-fills the ECR registry URL
-- Two separate AWS IAM credential sets:
-  - **ECR pull credentials** (installer-shared, distributed by the
-    operator with each install). Permissions:
-    `ecr:GetAuthorizationToken`, `ecr:BatchGetImage`,
-    `ecr:GetDownloadUrlForLayer`, `ecr:BatchCheckLayerAvailability`,
-    scoped to the `borzoi-backend` and `borzoi-frontend` repositories
-    only. **Pull-only — no other AWS access.**
-  - **App credentials** (customer-specific). Permissions: S3 on the
-    customer's bucket, SES send. Used by the backend container only;
-    never touched by docker.
+- ECR pull credentials (shared installer IAM user, distributed by the
+  operator with each install). Permissions:
+  `ecr:GetAuthorizationToken`, `ecr:BatchGetImage`,
+  `ecr:GetDownloadUrlForLayer`, `ecr:BatchCheckLayerAvailability`,
+  scoped to the `borzoi-backend` and `borzoi-frontend` repositories
+  only. **Pull-only — no other AWS access.**
 - A DNS record pointing your chosen domain at this host
+
+Note: the backend has code paths for S3 and SES but they are not
+currently used by the product. `setup.sh` writes placeholder AWS
+credentials; no per-customer AWS account is required today.
 
 ## Install
 
@@ -62,16 +62,13 @@ cd /opt/borzoi
 ```
 
 `setup.sh` is interactive. It will prompt for the domain, the **ECR
-pull credentials** (a separate, pull-only IAM user shared across all
-installs), the **app AWS credentials** (customer-specific, used only
-for S3 and SES), and an admin email. It auto-generates the DB
-password, JWT secret, and bootstrap admin password.
+pull credentials** (a shared installer IAM user), and an admin email.
+It auto-generates the DB password, JWT secret, and bootstrap admin
+password.
 
-The two cred sets are stored separately and never cross over:
-- ECR creds → `~/.aws/credentials` under the `[borzoi-ecr]` profile,
-  used by a wrapper around `amazon-ecr-credential-helper` so docker
-  pull works indefinitely without manual token refresh.
-- App creds → `.env`, read by the backend container at startup.
+ECR creds are stored in `~/.aws/credentials` under the `[borzoi-ecr]`
+profile, used by a wrapper around `amazon-ecr-credential-helper` so
+`docker pull` works indefinitely without manual token refresh.
 
 The admin login is printed once at the end — **save it**, it is not
 stored anywhere.
