@@ -1,0 +1,8 @@
+.env
+.env.backup.*
+data/
+certbot/conf/
+certbot/www/
+nginx/templates/*.conf
+*.log
+.DS_Store
