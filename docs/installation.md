@@ -117,12 +117,22 @@ You'll be prompted for the following, in order:
 
 | Prompt | What to enter | From credentials packet |
 |---|---|---|
-| `ECR region` | e.g. `eu-north-1` | yes |
-| `ECR Access Key ID` | shared installer access key | yes |
-| `ECR Secret Access Key` | shared installer secret | yes (hidden) |
-| `ECR registry URL` | auto-derived if aws-cli is installed; else e.g. `123456789012.dkr.ecr.eu-north-1.amazonaws.com` | derived or manual |
+| (multiline paste) installer credentials JSON | paste the JSON block from `aws-setup.sh`, end with Ctrl-D | yes |
 | `Bootstrap admin email` | e.g. `admin@acme.example` | yes |
 | `Cloudflare Tunnel token` | from Cloudflare Zero Trust dashboard; leave empty to configure later | yes or skip |
+
+The installer credentials JSON looks like:
+
+```json
+{
+  "ecr_region":        "eu-north-1",
+  "ecr_registry":      "123456789012.dkr.ecr.eu-north-1.amazonaws.com",
+  "access_key_id":     "AKIA...",
+  "secret_access_key": "..."
+}
+```
+
+The operator generates this once with `scripts/aws-setup.sh` and hands the same JSON to every customer install (same shared installer credentials for all sites).
 
 > **Note on AWS app credentials**: the backend has code paths for S3
 > (file uploads) and SES (account emails) but they are not used by the

@@ -1,5 +1,7 @@
 .env
 .env.backup.*
+installer-creds.json
+installer-creds.*.json
 data/
 certbot/conf/
 certbot/www/

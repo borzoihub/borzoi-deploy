@@ -26,14 +26,21 @@ Public domain:    borzoi.acme.example
 Pi hardware:      Raspberry Pi 5, 8GB
 
 ─── ECR pull credentials (shared installer — same for all sites) ───
-ECR region:       eu-north-1
-ECR registry:     123456789012.dkr.ecr.eu-north-1.amazonaws.com
-ECR access key:   AKIA...
-ECR secret key:   ...
+Paste this JSON block when setup.sh asks for it:
+
+{
+  "ecr_region":        "eu-north-1",
+  "ecr_registry":      "123456789012.dkr.ecr.eu-north-1.amazonaws.com",
+  "access_key_id":     "AKIA...",
+  "secret_access_key": "..."
+}
 
 ─── Bootstrap admin ───
 Admin email:      admin@acme.example
 (password is auto-generated during setup.sh and printed once)
+
+─── Cloudflare Tunnel ───
+Tunnel token:     <paste from Zero Trust dashboard>
 ================================================================
 ```
 

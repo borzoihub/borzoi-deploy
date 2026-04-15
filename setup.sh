@@ -115,27 +115,60 @@ echo "" >&2
 BORZOI_DOMAIN="localhost"
 BORZOI_BASE_URL="http://localhost:8080"
 
-# ---- ECR pull credentials (installer-shared, distinct from app creds) ----
+# ---- ECR pull credentials (paste the JSON the operator generated) ----
 echo "" >&2
-echo "ECR pull credentials — used only by docker on this host to pull images." >&2
-echo "These are separate from the application's AWS credentials below." >&2
+echo "Paste the installer credentials JSON (produced by scripts/aws-setup.sh" >&2
+echo "on the operator machine). End the paste with Ctrl-D on a blank line." >&2
 echo "" >&2
-ECR_REGION=$(ask "ECR region" "eu-north-1")
-ECR_AWS_ACCESS_KEY_ID=$(ask "ECR Access Key ID" "")
-ECR_AWS_SECRET_ACCESS_KEY=$(ask_secret "ECR Secret Access Key")
+echo "Shape expected (values will differ):" >&2
+echo "  {" >&2
+echo "    \"ecr_region\":        \"eu-north-1\"," >&2
+echo "    \"ecr_registry\":      \"<account>.dkr.ecr.<region>.amazonaws.com\"," >&2
+echo "    \"access_key_id\":     \"AKIA...\"," >&2
+echo "    \"secret_access_key\": \"...\"" >&2
+echo "  }" >&2
+echo "" >&2
+echo "(Paste now, then Ctrl-D):" >&2
 
-# Derive registry URL from the ECR account if aws-cli is available.
-ECR_REGISTRY_DEFAULT=""
-if [ "$HAS_AWS_CLI" = "1" ]; then
-  ECR_ACCOUNT_ID=$(AWS_ACCESS_KEY_ID="$ECR_AWS_ACCESS_KEY_ID" \
-                   AWS_SECRET_ACCESS_KEY="$ECR_AWS_SECRET_ACCESS_KEY" \
-                   AWS_REGION="$ECR_REGION" \
-                   aws sts get-caller-identity --query Account --output text 2>/dev/null || true)
-  if [ -n "$ECR_ACCOUNT_ID" ]; then
-    ECR_REGISTRY_DEFAULT="${ECR_ACCOUNT_ID}.dkr.ecr.${ECR_REGION}.amazonaws.com"
-  fi
+CREDS_JSON=$(cat)
+
+if [ -z "$CREDS_JSON" ]; then
+  err "Empty input. Paste the JSON from aws-setup.sh and try again."
+  exit 1
 fi
-ECR_REGISTRY=$(ask "ECR registry URL" "$ECR_REGISTRY_DEFAULT")
+
+# Minimal JSON field extractor — avoids a hard dependency on jq.
+# Handles the simple flat structure aws-setup.sh emits (no nesting, no arrays).
+extract_json_field() {
+  local field="$1" input="$2"
+  # Match   "field": "value"   with flexible whitespace; unescapes basic \" only.
+  printf '%s' "$input" | awk -v f="$field" '
+    BEGIN { FS="\"" }
+    {
+      for (i = 1; i < NF; i++) {
+        if ($i == f) {
+          for (j = i+1; j <= NF; j++) if ($j ~ /[^ :[:space:]]/) { print $j; exit }
+        }
+      }
+    }'
+}
+
+ECR_REGION=$(extract_json_field "ecr_region" "$CREDS_JSON")
+ECR_REGISTRY=$(extract_json_field "ecr_registry" "$CREDS_JSON")
+ECR_AWS_ACCESS_KEY_ID=$(extract_json_field "access_key_id" "$CREDS_JSON")
+ECR_AWS_SECRET_ACCESS_KEY=$(extract_json_field "secret_access_key" "$CREDS_JSON")
+
+MISSING=""
+[ -z "$ECR_REGION" ]              && MISSING="$MISSING ecr_region"
+[ -z "$ECR_REGISTRY" ]            && MISSING="$MISSING ecr_registry"
+[ -z "$ECR_AWS_ACCESS_KEY_ID" ]   && MISSING="$MISSING access_key_id"
+[ -z "$ECR_AWS_SECRET_ACCESS_KEY" ] && MISSING="$MISSING secret_access_key"
+if [ -n "$MISSING" ]; then
+  err "Pasted JSON is missing:$MISSING"
+  exit 1
+fi
+
+info "Parsed ECR credentials for region $ECR_REGION, registry $ECR_REGISTRY."
 
 # ---- Application AWS credentials (S3 + SES) ----
 # The backend has code paths for S3 (file uploads) and SES (account

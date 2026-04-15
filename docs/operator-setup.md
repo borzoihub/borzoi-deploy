@@ -32,19 +32,53 @@ export AWS_REGION=eu-north-1
 
 Replace `<account-id>` and `<region>` with your AWS account and region.
 
-## 3. Create the ECR repositories
+## 3. Create ECR repos + shared installer IAM user (automated)
 
-One-time, per repo. Run these from the respective repo directories:
+The `scripts/aws-setup.sh` in `borzoi-deploy` handles everything in one shot: creates the two ECR repos, creates the `borzoi-installer` IAM user, writes its inline policy, and issues access keys. Idempotent — safe to re-run.
 
 ```bash
-cd /path/to/borzoi-backend
-npm run docker:setup
-
-cd /path/to/borzoi-frontend
-npm run docker:setup
+cd /path/to/borzoi-deploy
+./scripts/aws-setup.sh
 ```
 
-Each `docker:setup` is idempotent — it skips if the repo already exists. It also enables scan-on-push.
+The script:
+1. **Asks for AWS admin credentials** interactively. These are held in environment variables for the duration of the script only — never written to disk, never committed to shell history, gone when the script exits.
+2. Creates `borzoi-backend` and `borzoi-frontend` ECR repos (scan-on-push enabled, AES256 encryption).
+3. Creates or updates the `borzoi-installer` IAM user with a policy scoped to pull-only on just those two repos.
+4. Issues a new access key (on first run), or reports the existing key ID (on re-runs).
+5. **Prints the installer credentials JSON to stdout** (copy-paste-ready for `setup.sh`) **and writes it to `./installer-creds.json`** (mode 600) for safekeeping on the operator machine. The file is gitignored. Pass `--json-out /dev/null` to skip the file write.
+
+Flags:
+- `--region <aws-region>` — override the region (default `$AWS_REGION` or `eu-north-1`)
+- `--rotate-key` — delete existing access keys and issue a new one. Use when rotating on schedule or if you've lost the secret.
+
+**Save the printed JSON block (or the `installer-creds.json` file) somewhere durable** — password manager is ideal. The secret is shown only at creation time and is not retrievable from AWS later. If you lose it, re-run with `--rotate-key` to issue a new access key.
+
+**Flags:**
+- `--region <aws-region>` — override the region
+- `--rotate-key` — delete existing access keys and issue a new one
+- `--json-out <path>` — override the file output path (default `./installer-creds.json`). Pass `/dev/null` to skip writing the file.
+
+## 3a. Manual equivalent (if you prefer not to run the script)
+
+Everything the script does, you can do by hand:
+
+```bash
+# ECR repos
+aws ecr create-repository --repository-name borzoi-backend \
+  --region eu-north-1 --image-scanning-configuration scanOnPush=true
+aws ecr create-repository --repository-name borzoi-frontend \
+  --region eu-north-1 --image-scanning-configuration scanOnPush=true
+
+# IAM user
+aws iam create-user --user-name borzoi-installer
+aws iam put-user-policy --user-name borzoi-installer \
+  --policy-name borzoi-ecr-pull \
+  --policy-document file://borzoi-installer-policy.json
+aws iam create-access-key --user-name borzoi-installer
+```
+
+The `borzoi-installer-policy.json` template appears in step 5 below.
 
 ## 4. Publishing images
 
@@ -73,23 +107,9 @@ npm run docker:release
 
 Native arm64 build takes ~1-2 minutes on Apple Silicon. On Intel Macs, QEMU emulation adds ~2-3×.
 
-## 5. Create the shared ECR pull IAM user
+## 5. IAM policy reference
 
-This IAM user's credentials go on **every** customer Pi. It's pull-only, scoped to just the borzoi repos.
-
-```bash
-# Create the user
-aws iam create-user --user-name borzoi-installer
-
-# Attach the policy (save this as borzoi-installer-policy.json first)
-aws iam put-user-policy \
-  --user-name borzoi-installer \
-  --policy-name borzoi-ecr-pull \
-  --policy-document file://borzoi-installer-policy.json
-
-# Generate access keys
-aws iam create-access-key --user-name borzoi-installer
-```
+(Already applied automatically by `scripts/aws-setup.sh` in step 3. This reference exists for audit / the manual path in step 3a.)
 
 `borzoi-installer-policy.json`:
 
