@@ -16,6 +16,10 @@ services:
       interval: 5s
       timeout: 3s
       retries: 20
+      # First-boot cluster init on Raspberry Pi SD storage can take
+      # ~60s (CREATE ROLE/DATABASE, TimescaleDB extension install).
+      # Failures during start_period don't count against retries.
+      start_period: 90s
     networks: [borzoi]
 
   backend:

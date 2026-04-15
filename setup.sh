@@ -190,12 +190,33 @@ echo "" >&2
 echo "Cloudflare Tunnel exposes this Pi at a public URL via Cloudflare's" >&2
 echo "edge (no port forwarding, no direct public IP). Create the tunnel" >&2
 echo "in the Zero Trust dashboard (https://one.dash.cloudflare.com → Networks" >&2
-echo "→ Tunnels → Create), copy its connector token, paste it below." >&2
-echo "Configure the public hostname → http://localhost:8080 in the same UI." >&2
+echo "→ Tunnels → Create)." >&2
 echo "" >&2
+echo "Paste EITHER the full command Cloudflare shows you (starts with" >&2
+echo "'sudo cloudflared service install eyJ...') OR just the eyJ... token." >&2
+echo "Either works — we extract the token automatically." >&2
+echo "" >&2
+echo "Configure the public hostname → http://localhost:8080 in the same UI." >&2
 echo "Leave blank to skip — you can run this step later from the docs." >&2
 echo "" >&2
-read -rp "Cloudflare Tunnel token (or empty to skip): " CLOUDFLARE_TUNNEL_TOKEN >&2 || true
+read -rp "Cloudflare Tunnel token (or command, or empty to skip): " CLOUDFLARE_TUNNEL_INPUT >&2 || true
+
+# Extract the token. Cloudflare tokens are base64-encoded JSON so they
+# always start with 'eyJ' (the encoded '{"') and contain only URL-safe
+# base64 characters. This regex finds that pattern wherever it sits in
+# what the user pasted.
+if [ -n "${CLOUDFLARE_TUNNEL_INPUT:-}" ]; then
+  CLOUDFLARE_TUNNEL_TOKEN=$(printf '%s' "$CLOUDFLARE_TUNNEL_INPUT" | \
+    grep -oE 'eyJ[A-Za-z0-9+/=_-]+' | head -1 || true)
+  if [ -z "$CLOUDFLARE_TUNNEL_TOKEN" ]; then
+    err "Could not find a Cloudflare token (expected to start with 'eyJ') in the pasted input."
+    err "Paste either the full 'sudo cloudflared service install <token>' command"
+    err "or just the token itself."
+    exit 1
+  fi
+else
+  CLOUDFLARE_TUNNEL_TOKEN=""
+fi
 
 # ---------- optional AWS validation ----------------------------------------
 

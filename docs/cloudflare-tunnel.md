@@ -20,9 +20,13 @@ The default deployment model. The Pi binds only to `127.0.0.1:8080`, and Cloudfl
 1. https://one.dash.cloudflare.com → **Networks** → **Tunnels** → **Create a tunnel**.
 2. Select connector type: **Cloudflared**.
 3. Name the tunnel (e.g. `borzoi-acme-heating`). Save.
-4. Pick the environment: **Debian** / **64-bit**. The dashboard will show a long install command — you only need the **token** inside it, the part after `install `. It looks like `eyJhIjo...` (base64).
+4. Pick the environment: **Debian** / **64-bit**. The dashboard will show a long install command that looks like:
+   ```
+   sudo cloudflared service install eyJhIjoi...
+   ```
+   You can copy the whole line or just the `eyJ...` token part — `setup.sh` accepts both forms and extracts the token automatically. Copying the whole line is usually easier because the dashboard doesn't offer a "copy just the token" button.
 
-> **Don't install cloudflared manually from the displayed command.** `setup.sh` does the install for you when you paste the token. Installing twice leads to two competing connectors.
+> **Don't run the copied command directly.** `setup.sh` handles the install (including adding Cloudflare's apt repo) when you paste it. Running it manually first leads to two competing connector installations.
 
 5. Under **Public Hostnames** tab, add:
    - **Subdomain**: e.g. `borzoi`

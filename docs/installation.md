@@ -119,7 +119,7 @@ You'll be prompted for the following, in order:
 |---|---|---|
 | (multiline paste) installer credentials JSON | paste the JSON block from `aws-setup.sh`, end with Ctrl-D | yes |
 | `Bootstrap admin email` | e.g. `admin@acme.example` | yes |
-| `Cloudflare Tunnel token` | from Cloudflare Zero Trust dashboard; leave empty to configure later | yes or skip |
+| `Cloudflare Tunnel token` | paste either the full `sudo cloudflared service install <token>` line or just the `eyJ...` token — setup.sh extracts it either way. Leave empty to configure later. | yes or skip |
 
 The installer credentials JSON looks like:
 

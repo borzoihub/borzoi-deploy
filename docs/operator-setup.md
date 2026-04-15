@@ -15,8 +15,8 @@ Work you do **once** as the developer before any customer installation. Most of 
 The backend and frontend Dockerfiles use a BuildKit secret to auth against GitHub Packages. Put the token in a file with mode 600:
 
 ```bash
-echo "ghp_your_token_here" > ~/.borzoi-ghcr-token
-chmod 600 ~/.borzoi-ghcr-token
+echo "ghp_your_token_here" > ~/.borzoi-github-packages-token
+chmod 600 ~/.borzoi-github-packages-token
 ```
 
 The secret is never baked into the image — BuildKit mounts it only for the duration of `npm ci`.
@@ -102,7 +102,7 @@ npm run docker:release
 ```
 
 `docker:release` does:
-1. `docker buildx build --platform linux/arm64 --secret id=ghtoken,src=~/.borzoi-ghcr-token --load -t $BORZOI_ECR_REGISTRY/borzoi-<name>:<version> -t $BORZOI_ECR_REGISTRY/borzoi-<name>:latest .`
+1. `docker buildx build --platform linux/arm64 --secret id=ghtoken,src=~/.borzoi-github-packages-token --load -t $BORZOI_ECR_REGISTRY/borzoi-<name>:<version> -t $BORZOI_ECR_REGISTRY/borzoi-<name>:latest .`
 2. `docker push` both tags
 
 Native arm64 build takes ~1-2 minutes on Apple Silicon. On Intel Macs, QEMU emulation adds ~2-3×.
