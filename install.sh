@@ -5,7 +5,7 @@ set -euo pipefail
 # Borzoi install bootstrap — fresh Pi one-liner.
 #
 # Typical invocation:
-#   curl -fsSL https://raw.githubusercontent.com/yourorg/borzoi-deploy/main/install.sh | bash
+#   curl -fsSL https://raw.githubusercontent.com/borzoihub/borzoi-deploy/main/install.sh | bash
 #
 # Env var overrides:
 #   INSTALL_DIR          target path (default: /opt/borzoi)
@@ -13,7 +13,7 @@ set -euo pipefail
 # ============================================================================
 
 INSTALL_DIR="${INSTALL_DIR:-/opt/borzoi}"
-BORZOI_DEPLOY_REPO="${BORZOI_DEPLOY_REPO:-https://github.com/yourorg/borzoi-deploy.git}"
+BORZOI_DEPLOY_REPO="${BORZOI_DEPLOY_REPO:-https://github.com/borzoihub/borzoi-deploy.git}"
 
 echo "Installing borzoi-deploy → $INSTALL_DIR"
 echo "Source repo: $BORZOI_DEPLOY_REPO"

@@ -1,16 +1,23 @@
-# TLS / HTTPS setup
+# TLS / HTTPS
 
-Borzoi-deploy defaults to HTTP so Let's Encrypt's webroot challenge can answer on port 80 without nginx already serving HTTPS. Flip to HTTPS after the initial install.
+**The default deployment uses [Cloudflare Tunnel](cloudflare-tunnel.md), which terminates HTTPS at Cloudflare's edge. You don't need a local TLS cert. Skip this file unless you're intentionally doing a direct-internet install.**
 
-## Prerequisites
+---
 
-- Port 80 reachable from the public internet (router port forwarding if the Pi is behind NAT)
-- DNS A record pointing at the Pi's public IP
-- The stack running and reachable at `http://$BORZOI_DOMAIN`
+## Direct-internet install (advanced / not recommended)
 
-## 1. Issue the initial certificate
+If you want to bypass Cloudflare Tunnel and expose the Pi directly on the public internet — for example on a static IP with port forwarding — you'll need to:
 
-One-shot certbot run against the live nginx:
+1. Rebind nginx to public ports (edit `docker-compose.yml`: change the `ports:` line from `"127.0.0.1:8080:80"` to `"80:80"` and add `"443:443"`).
+2. Add the HTTPS server block back into `nginx/templates/default.conf.template` (removed in the current template for the Cloudflare Tunnel default).
+3. Issue certificates with certbot (see below).
+4. Open 80/tcp and 443/tcp on the router.
+
+This mode is **not recommended** for customer installs: you expose a Pi directly to the internet, manage DDoS yourself, renew certificates, and maintain DNS. Cloudflare Tunnel avoids all of this.
+
+### Issuing the certificate
+
+One-shot certbot run:
 
 ```bash
 cd /opt/borzoi
@@ -27,25 +34,13 @@ docker run --rm \
   --non-interactive
 ```
 
-Expected output:
+### nginx HTTPS server block
 
-```
-Successfully received certificate.
-Certificate is saved at: /etc/letsencrypt/live/<domain>/fullchain.pem
-Key is saved at:         /etc/letsencrypt/live/<domain>/privkey.pem
-```
-
-If this fails with "challenge failed", DNS isn't pointing at the Pi, or port 80 isn't reachable. Run `curl http://<public-ip>/.well-known/acme-challenge/test` from an external network to verify connectivity.
-
-## 2. Enable the HTTPS server block
-
-Edit `nginx/templates/default.conf.template`. Uncomment the HTTPS `server { ... }` block at the bottom, and uncomment the `return 301 https://$host$request_uri;` line in the HTTP block to force all HTTP → HTTPS.
-
-Final file should look like:
+Add to `nginx/templates/default.conf.template`:
 
 ```nginx
 server {
-    listen 80;
+    listen 80 default_server;
     server_name ${BORZOI_DOMAIN};
 
     location /.well-known/acme-challenge/ {
@@ -71,8 +66,6 @@ server {
         proxy_set_header   X-Real-IP         $remote_addr;
         proxy_set_header   X-Forwarded-For   $proxy_add_x_forwarded_for;
         proxy_set_header   X-Forwarded-Proto $scheme;
-        proxy_set_header   Upgrade           $http_upgrade;
-        proxy_set_header   Connection        "upgrade";
         proxy_read_timeout 300s;
     }
 
@@ -83,19 +76,19 @@ server {
 }
 ```
 
-Restart nginx to pick up the new template:
+Mount the certbot volumes back in the nginx service (`docker-compose.yml`):
 
-```bash
-docker compose restart nginx
+```yaml
+    volumes:
+      - ./nginx/templates:/etc/nginx/templates:ro
+      - frontend-static:/usr/share/nginx/html:ro
+      - ./certbot/conf:/etc/letsencrypt:ro
+      - ./certbot/www:/var/www/certbot:ro
 ```
 
-Visit `https://$BORZOI_DOMAIN` — should serve with a valid cert and no warnings.
+Restart nginx: `docker compose restart nginx`.
 
-## 3. Automate renewal
-
-Let's Encrypt certs are valid for 90 days. Renewal is simple but needs to run periodically. Two options:
-
-### Option A — cron + one-shot certbot
+### Automated renewal
 
 Add to root's crontab (`sudo crontab -e`):
 
@@ -103,29 +96,4 @@ Add to root's crontab (`sudo crontab -e`):
 0 3 * * 1 cd /opt/borzoi && docker run --rm -v $PWD/certbot/conf:/etc/letsencrypt -v $PWD/certbot/www:/var/www/certbot certbot/certbot renew --quiet && docker compose exec nginx nginx -s reload
 ```
 
-Runs weekly at 03:00 Monday. Certbot only actually renews if within 30 days of expiry, so this is cheap.
-
-### Option B — certbot service in compose (auto-renewing)
-
-Add a `certbot` service to `docker-compose.yml`:
-
-```yaml
-  certbot:
-    image: certbot/certbot:latest
-    container_name: borzoi-certbot
-    restart: unless-stopped
-    volumes:
-      - ./certbot/conf:/etc/letsencrypt
-      - ./certbot/www:/var/www/certbot
-    entrypoint: "/bin/sh -c 'trap exit TERM; while :; do certbot renew --quiet; sleep 12h & wait $${!}; done;'"
-```
-
-And a sidecar to reload nginx when certs change (or just let nginx serve the old cert until the next restart — Let's Encrypt doesn't revoke on renewal).
-
-Option A is simpler and more robust for a Pi.
-
-## Troubleshooting
-
-- **"Challenge failed"**: check DNS (`dig $BORZOI_DOMAIN`), check port 80 is open from the internet, check `certbot/www` is writable.
-- **"Too many requests"**: Let's Encrypt has rate limits (50 certs per registered domain per week). If you're iterating, use `--test-cert` to hit the staging server first.
-- **"Certificate valid but browser warns"**: might be an intermediate chain issue. Run `openssl s_client -connect $BORZOI_DOMAIN:443 -servername $BORZOI_DOMAIN < /dev/null | grep -E "^(subject|issuer)"` to inspect.
+Runs weekly. Certbot only actually renews if within 30 days of expiry.

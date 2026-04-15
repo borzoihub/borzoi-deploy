@@ -4,12 +4,16 @@ set -euo pipefail
 # ============================================================================
 # Borzoi deploy setup — interactive, first-boot orchestration.
 #
-# - Prompts for environment-specific values (domain, AWS creds)
+# The stack binds to http://localhost:8080 on the host. Public access is
+# expected to come through a Cloudflare Tunnel (or any reverse proxy
+# the operator puts in front). Setup optionally installs + enrolls
+# cloudflared with a tunnel token.
+#
+# - Prompts for environment-specific values (ECR creds, Cloudflare token)
 # - Generates strong secrets for DB, JWT, and the bootstrap admin password
 # - Writes a .env file (mode 0600)
-# - Creates data / certbot / nginx directories
 # - Installs amazon-ecr-credential-helper and configures docker to use it
-#   so ECR auth tokens auto-refresh (no PATs, no expiring logins)
+# - Optionally installs cloudflared and enrolls a Zero Trust tunnel
 # - Pulls images and brings the stack up
 # - Prints the admin login ONCE at the end — not stored anywhere else
 # ============================================================================
@@ -103,8 +107,13 @@ echo "" >&2
 echo "Borzoi setup — please answer the following prompts." >&2
 echo "" >&2
 
-BORZOI_DOMAIN=$(ask "Public domain (e.g. borzoi.example.com)" "")
-BORZOI_BASE_URL=$(ask "Public base URL" "https://$BORZOI_DOMAIN")
+# The stack always binds to http://localhost:8080 on the host. Public
+# access comes through a Cloudflare Tunnel (or another reverse proxy).
+# These defaults can be overridden after install by editing .env; needed
+# only when SES/email features are enabled and links in outbound mail
+# must point at a real public URL.
+BORZOI_DOMAIN="localhost"
+BORZOI_BASE_URL="http://localhost:8080"
 
 # ---- ECR pull credentials (installer-shared, distinct from app creds) ----
 echo "" >&2
@@ -142,6 +151,18 @@ S3_BUCKET="borzoi-unused"
 SES_SENDER="no-reply@$BORZOI_DOMAIN"
 
 BORZOI_ADMIN_EMAIL=$(ask "Bootstrap admin email" "")
+
+# ---- Cloudflare Tunnel (optional) ----
+echo "" >&2
+echo "Cloudflare Tunnel exposes this Pi at a public URL via Cloudflare's" >&2
+echo "edge (no port forwarding, no direct public IP). Create the tunnel" >&2
+echo "in the Zero Trust dashboard (https://one.dash.cloudflare.com → Networks" >&2
+echo "→ Tunnels → Create), copy its connector token, paste it below." >&2
+echo "Configure the public hostname → http://localhost:8080 in the same UI." >&2
+echo "" >&2
+echo "Leave blank to skip — you can run this step later from the docs." >&2
+echo "" >&2
+read -rp "Cloudflare Tunnel token (or empty to skip): " CLOUDFLARE_TUNNEL_TOKEN >&2 || true
 
 # ---------- optional AWS validation ----------------------------------------
 
@@ -322,6 +343,36 @@ docker compose pull
 
 info "Bringing stack up..."
 docker compose up -d
+
+# ---------- Cloudflare Tunnel (optional) -----------------------------------
+
+if [ -n "${CLOUDFLARE_TUNNEL_TOKEN:-}" ]; then
+  if ! command -v cloudflared >/dev/null 2>&1; then
+    info "Installing cloudflared from Cloudflare's apt repo..."
+    sudo mkdir -p --mode=0755 /usr/share/keyrings
+    curl -fsSL https://pkg.cloudflare.com/cloudflare-main.gpg | \
+      sudo tee /usr/share/keyrings/cloudflare-main.gpg >/dev/null
+    echo 'deb [signed-by=/usr/share/keyrings/cloudflare-main.gpg] https://pkg.cloudflare.com/cloudflared any main' | \
+      sudo tee /etc/apt/sources.list.d/cloudflared.list >/dev/null
+    sudo apt-get update
+    sudo apt-get install -y cloudflared
+  fi
+
+  info "Enrolling cloudflared as a systemd service..."
+  # `cloudflared service install <TOKEN>` registers + starts a systemd unit
+  # that runs the connector with the provided tunnel token. Idempotent:
+  # uninstall first if already present to pick up a new token.
+  if systemctl list-unit-files cloudflared.service >/dev/null 2>&1; then
+    sudo cloudflared service uninstall || true
+  fi
+  sudo cloudflared service install "$CLOUDFLARE_TUNNEL_TOKEN"
+  info "cloudflared running. Configure the public hostname → http://localhost:8080"
+  info "in the Cloudflare Zero Trust dashboard."
+else
+  info "Cloudflare Tunnel skipped. The stack is reachable at http://localhost:8080"
+  info "from the Pi itself; run 'cloudflared service install <token>' later"
+  info "to expose it publicly."
+fi
 
 # ---------- admin credentials banner ---------------------------------------
 

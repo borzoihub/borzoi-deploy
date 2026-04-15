@@ -41,15 +41,15 @@ services:
     restart: unless-stopped
     depends_on:
       frontend: { condition: service_completed_successfully }
+    # Bind to loopback only — public exposure is expected to go through
+    # Cloudflare Tunnel (or another reverse proxy) on the host, which
+    # will forward to http://localhost:8080.
     ports:
-      - "80:80"
-      - "443:443"
+      - "127.0.0.1:8080:80"
     env_file: .env
     volumes:
       - ./nginx/templates:/etc/nginx/templates:ro
       - frontend-static:/usr/share/nginx/html:ro
-      - ./certbot/conf:/etc/letsencrypt:ro
-      - ./certbot/www:/var/www/certbot:ro
     networks: [borzoi]
 
 volumes:

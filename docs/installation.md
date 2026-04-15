@@ -18,8 +18,14 @@ End-to-end walkthrough from blank SD card to a working Borzoi login.
 - Bootstrap admin email
 
 **Network**:
-- A DNS record pointing the chosen domain at the Pi's public/LAN IP
-- Router port forwarding for 80/tcp and 443/tcp if reaching from the internet
+- Outbound internet access (for ECR pulls, Cloudflare Tunnel connector)
+- **No port forwarding required** — the stack binds to `127.0.0.1:8080`
+  and is exposed publicly through a Cloudflare Tunnel (see [cloudflare-tunnel.md](cloudflare-tunnel.md))
+
+**Cloudflare Tunnel** (optional but recommended):
+- A Zero Trust account (free tier is fine — https://one.dash.cloudflare.com)
+- A tunnel created in Networks → Tunnels → Create, with its connector token
+- A public hostname configured on that tunnel, pointing at `http://localhost:8080`
 
 ## Step 1 — Flash Raspberry Pi OS
 
@@ -92,7 +98,7 @@ sudo chown $USER:$USER /opt/borzoi
 ## Step 7 — Clone the deploy bundle
 
 ```bash
-git clone --depth 1 https://github.com/yourorg/borzoi-deploy.git /opt/borzoi
+git clone --depth 1 https://github.com/borzoihub/borzoi-deploy.git /opt/borzoi
 cd /opt/borzoi
 ```
 
@@ -111,13 +117,12 @@ You'll be prompted for the following, in order:
 
 | Prompt | What to enter | From credentials packet |
 |---|---|---|
-| `Public domain` | e.g. `borzoi.acme.example` | yes |
-| `Public base URL` | defaults to `https://$domain` | derived |
 | `ECR region` | e.g. `eu-north-1` | yes |
 | `ECR Access Key ID` | shared installer access key | yes |
 | `ECR Secret Access Key` | shared installer secret | yes (hidden) |
 | `ECR registry URL` | auto-derived if aws-cli is installed; else e.g. `123456789012.dkr.ecr.eu-north-1.amazonaws.com` | derived or manual |
 | `Bootstrap admin email` | e.g. `admin@acme.example` | yes |
+| `Cloudflare Tunnel token` | from Cloudflare Zero Trust dashboard; leave empty to configure later | yes or skip |
 
 > **Note on AWS app credentials**: the backend has code paths for S3
 > (file uploads) and SES (account emails) but they are not used by the
@@ -135,7 +140,8 @@ What happens after the prompts:
 5. **AWS profile installed** — ECR creds written to `~/.aws/credentials` under `[borzoi-ecr]`. Any existing AWS profiles are preserved.
 6. **ECR credential helper wired up** — a wrapper at `/usr/local/bin/docker-credential-borzoi-ecr-login` is installed (requires sudo), and `~/.docker/config.json` is configured to use it.
 7. **Images pulled** — `docker compose pull`.
-8. **Stack brought up** — `docker compose up -d`.
+8. **Stack brought up** — `docker compose up -d`. Binds to `127.0.0.1:8080`.
+9. **Cloudflare Tunnel enrolled** (if a token was provided) — installs `cloudflared` via apt, runs `cloudflared service install <token>`, starts as a systemd service.
 
 At the end, the admin credentials are printed **once**:
 
@@ -150,21 +156,23 @@ Borzoi admin login (save this — shown only once):
 
 Copy this to a password manager immediately. It is not stored anywhere retrievable.
 
-## Step 9 — First login (HTTP only)
+## Step 9 — First login
 
-Until TLS is configured, the Pi serves on plain HTTP on port 80.
+Through the Cloudflare Tunnel (if configured during setup.sh), visit the public hostname you set up in the Zero Trust dashboard. Cloudflare terminates HTTPS and forwards to `http://localhost:8080` on the Pi.
 
-Open `http://<pi-ip>` (or, once DNS is pointed and from inside your LAN, `http://$domain`):
+Without Cloudflare Tunnel, SSH-port-forward to test:
+
+```bash
+# From your laptop:
+ssh -L 8080:localhost:8080 borzoi@<pi-ip>
+# Then browse to http://localhost:8080 on your laptop
+```
 
 1. Log in with the bootstrap admin email + password.
 2. You should reach the main dashboard.
 3. The backend logs (`docker compose logs backend -f`) will show "waiting for required settings" messages every 60s — this is expected until you fill in the installation settings.
 
-## Step 10 — Enable HTTPS
-
-See [tls.md](tls.md) for Let's Encrypt issuance and nginx config updates.
-
-## Step 11 — Configure the installation
+## Step 10 — Configure the installation
 
 Via the Borzoi UI, enter:
 - Installation settings (latitude, longitude, solar sections)
@@ -176,7 +184,7 @@ Via the Borzoi UI, enter:
 
 Within 60 seconds of saving the last required setting, the scheduler, flow-temp regulator, and ingestion services activate automatically. No restart required. The "waiting for required settings" log messages stop.
 
-## Step 12 — Verify
+## Step 11 — Verify
 
 ```bash
 cd /opt/borzoi

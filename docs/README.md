@@ -15,7 +15,8 @@ For each new customer Pi you deploy:
 
 3. **[Customer onboarding](customer-onboarding.md)** — create the customer's IAM user, assemble their credentials packet
 4. **[Installation guide](installation.md)** — end-to-end walkthrough from a fresh Raspberry Pi OS install to first login
-5. **[TLS setup](tls.md)** — issue Let's Encrypt certificates
+5. **[Cloudflare Tunnel](cloudflare-tunnel.md)** — default public-exposure model
+6. **[TLS setup](tls.md)** — only for direct-internet installs (not recommended)
 
 ## Operations
 
@@ -31,7 +32,8 @@ For each new customer Pi you deploy:
 | Per-customer IAM setup | [customer-onboarding.md](customer-onboarding.md#creating-the-app-iam-user) |
 | Fresh Pi install, step by step | [installation.md](installation.md) |
 | `setup.sh` interactive prompts | [installation.md#running-setupsh](installation.md#running-setupsh) |
-| Enabling HTTPS | [tls.md](tls.md) |
+| Public exposure via Cloudflare | [cloudflare-tunnel.md](cloudflare-tunnel.md) |
+| Direct-internet TLS (rare) | [tls.md](tls.md) |
 | Updates and rollback | [updating.md](updating.md) |
 | ECR pull failures | [troubleshooting.md#ecr-pull-failures](troubleshooting.md#ecr-pull-failures) |
 | Scheduler not activating | [troubleshooting.md#backend-logs-waiting-for-required-settings](troubleshooting.md#backend-logs-waiting-for-required-settings) |

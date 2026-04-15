@@ -49,14 +49,14 @@ credentials; no per-customer AWS account is required today.
 One-liner from a fresh Pi:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/yourorg/borzoi-deploy/main/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/borzoihub/borzoi-deploy/main/install.sh | bash
 ```
 
 Manual equivalent:
 
 ```bash
 sudo mkdir -p /opt/borzoi && sudo chown "$USER" /opt/borzoi
-git clone --depth 1 https://github.com/yourorg/borzoi-deploy.git /opt/borzoi
+git clone --depth 1 https://github.com/borzoihub/borzoi-deploy.git /opt/borzoi
 cd /opt/borzoi
 ./setup.sh
 ```

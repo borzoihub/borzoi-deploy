@@ -134,7 +134,7 @@ Update `install.sh` to point at wherever you host it:
 
 ```bash
 # In borzoi-deploy/install.sh
-BORZOI_DEPLOY_REPO="${BORZOI_DEPLOY_REPO:-https://github.com/yourorg/borzoi-deploy.git}"
+BORZOI_DEPLOY_REPO="${BORZOI_DEPLOY_REPO:-https://github.com/borzoihub/borzoi-deploy.git}"
 ```
 
 ## 7. Rotation cadence
