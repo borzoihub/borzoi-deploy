@@ -86,6 +86,45 @@ fi
 
 cd "$(dirname "$0")"
 
+# ---------- filesystem expansion (SD card) ----------------------------------
+# SD card images are often smaller than the physical card. Offer to expand
+# the root partition to use all available space.
+
+ROOT_DEV=$(findmnt -n -o SOURCE /)
+ROOT_DISK=$(lsblk -no PKNAME "$ROOT_DEV" 2>/dev/null || true)
+
+if [ -n "$ROOT_DISK" ]; then
+  DISK_SIZE=$(lsblk -bno SIZE "/dev/$ROOT_DISK" | head -1)
+  PART_SIZE=$(lsblk -bno SIZE "$ROOT_DEV" | head -1)
+
+  if [ -n "$DISK_SIZE" ] && [ -n "$PART_SIZE" ]; then
+    DISK_GB=$(awk "BEGIN { printf \"%.0f\", $DISK_SIZE / 1073741824 }")
+    PART_GB=$(awk "BEGIN { printf \"%.0f\", $PART_SIZE / 1073741824 }")
+    UNUSED_GB=$(awk "BEGIN { printf \"%.0f\", ($DISK_SIZE - $PART_SIZE) / 1073741824 }")
+
+    if [ "$UNUSED_GB" -gt 1 ]; then
+      echo "" >&2
+      echo "The root filesystem uses ${PART_GB}GB of a ${DISK_GB}GB disk" >&2
+      echo "(${UNUSED_GB}GB unused)." >&2
+      expand=$(ask "Expand filesystem to use the full disk? (yes/no)" "yes")
+      if [ "$expand" = "yes" ]; then
+        PART_NUM=$(echo "$ROOT_DEV" | grep -o '[0-9]*$')
+        info "Expanding partition ${ROOT_DISK}p${PART_NUM}..."
+        if command -v growpart >/dev/null 2>&1; then
+          sudo growpart "/dev/$ROOT_DISK" "$PART_NUM"
+        else
+          info "Installing growpart..."
+          sudo apt-get update && sudo apt-get install -y cloud-guest-utils
+          sudo growpart "/dev/$ROOT_DISK" "$PART_NUM"
+        fi
+        sudo resize2fs "$ROOT_DEV"
+        NEW_SIZE=$(df -h / | awk 'NR==2 {print $2}')
+        info "Filesystem expanded to $NEW_SIZE."
+      fi
+    fi
+  fi
+fi
+
 # ---------- existing .env handling ------------------------------------------
 
 if [ -f .env ]; then
@@ -306,10 +345,6 @@ BORZOI_AWS_SECRET_ACCESS_KEY=$AWS_SECRET_ACCESS_KEY
 S3_BUCKET=$S3_BUCKET
 SES_SENDER=$SES_SENDER
 
-# Allow typeorm synchronize in Production (required for self-hosted first
-# install without an initial-schema migration). SaaS production does NOT
-# set this.
-BORZOI_ALLOW_SYNC_IN_PROD=true
 EOF
 chmod 600 .env
 info ".env written (mode 600)."

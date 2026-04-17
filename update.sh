@@ -54,4 +54,8 @@ docker compose pull
 info "Restarting stack..."
 docker compose up -d
 
+# Clean up old images to prevent disk from filling up
+info "Pruning unused Docker images..."
+docker image prune -af
+
 info "Update complete."
