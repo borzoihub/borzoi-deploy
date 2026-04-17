@@ -34,14 +34,17 @@ else
   exit 1
 fi
 
-# ---------- ECR login --------------------------------------------------------
+# ---------- ECR credential check ---------------------------------------------
 
-# Extract region from ECR_REGISTRY URL (e.g. 123456789012.dkr.ecr.eu-north-1.amazonaws.com)
-ECR_REGION=$(echo "$ECR_REGISTRY" | sed 's/.*\.ecr\.\(.*\)\.amazonaws\.com/\1/')
-
-info "Logging in to ECR ($ECR_REGION)..."
-AWS_PROFILE=borzoi-ecr aws ecr get-login-password --region "$ECR_REGION" \
-  | docker login --username AWS --password-stdin "$ECR_REGISTRY"
+# The docker credential helper (docker-credential-borzoi-ecr-login) handles
+# ECR auth automatically on every pull. Verify it works before pulling.
+info "Verifying ECR credentials..."
+if echo "$ECR_REGISTRY" | docker-credential-borzoi-ecr-login get >/dev/null 2>&1; then
+  info "ECR credentials OK."
+else
+  err "ECR credential helper failed. Check ~/.aws/credentials [borzoi-ecr] profile."
+  exit 1
+fi
 
 # ---------- pull + restart ---------------------------------------------------
 
