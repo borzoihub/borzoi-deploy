@@ -315,7 +315,7 @@ info ".env written (mode 600)."
 
 # ---------- directories ----------------------------------------------------
 
-mkdir -p data/postgres certbot/conf certbot/www nginx/templates
+mkdir -p data/postgres data/backups certbot/conf certbot/www nginx/templates
 
 # ---------- ECR credential helper -----------------------------------------
 # Two-profile setup: the ECR pull credentials live in a borzoi-specific
@@ -424,6 +424,18 @@ docker compose pull
 
 info "Bringing stack up..."
 docker compose up -d
+
+# ---------- nightly database backup cron -----------------------------------
+
+BACKUP_SCRIPT="$(pwd)/scripts/db-backup.sh"
+CRON_SCHEDULE="0 2 * * *"
+CRON_LINE="$CRON_SCHEDULE cd $(pwd) && . .env && $BACKUP_SCRIPT >> data/backups/backup.log 2>&1"
+
+# Install (or replace) the cron entry — idempotent.
+( crontab -l 2>/dev/null | grep -v "db-backup.sh" || true
+  echo "$CRON_LINE"
+) | crontab -
+info "Nightly database backup cron installed (02:00)."
 
 # ---------- Cloudflare Tunnel (optional) -----------------------------------
 
