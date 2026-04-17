@@ -36,10 +36,10 @@ fi
 
 # ---------- ECR login --------------------------------------------------------
 
-ECR_REGION=$(awk -F= '/^\[borzoi-ecr\]/{found=1} found && /^region/{print $2; exit}' ~/.aws/config | tr -d ' ')
-ECR_REGION="${ECR_REGION:-eu-north-1}"
+# Extract region from ECR_REGISTRY URL (e.g. 123456789012.dkr.ecr.eu-north-1.amazonaws.com)
+ECR_REGION=$(echo "$ECR_REGISTRY" | sed 's/.*\.ecr\.\(.*\)\.amazonaws\.com/\1/')
 
-info "Logging in to ECR..."
+info "Logging in to ECR ($ECR_REGION)..."
 AWS_PROFILE=borzoi-ecr aws ecr get-login-password --region "$ECR_REGION" \
   | docker login --username AWS --password-stdin "$ECR_REGISTRY"
 
