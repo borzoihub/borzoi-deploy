@@ -34,6 +34,15 @@ else
   exit 1
 fi
 
+# ---------- ECR login --------------------------------------------------------
+
+ECR_REGION=$(awk -F= '/^\[borzoi-ecr\]/{found=1} found && /^region/{print $2; exit}' ~/.aws/config | tr -d ' ')
+ECR_REGION="${ECR_REGION:-eu-north-1}"
+
+info "Logging in to ECR..."
+AWS_PROFILE=borzoi-ecr aws ecr get-login-password --region "$ECR_REGION" \
+  | docker login --username AWS --password-stdin "$ECR_REGISTRY"
+
 # ---------- pull + restart ---------------------------------------------------
 
 info "Pulling latest images..."
