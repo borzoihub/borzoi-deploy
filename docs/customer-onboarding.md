@@ -8,9 +8,9 @@ The backend has code paths for S3 (file uploads) and SES (account emails) but ne
 
 If/when S3 or SES features are wired in later, each customer will need an IAM user with policies scoped to their bucket + SES domain. That setup has been captured in the [Future: per-customer AWS setup](#future-per-customer-aws-setup) section below so the procedure isn't lost.
 
-## 1. Choose a domain
+## 1. Choose an installation ID
 
-Pick the public hostname the customer will use (e.g. `borzoi.acme.example`). They (or you) add an A record pointing at the Pi's public IP.
+Pick a short, URL-safe identifier for this installation (e.g. `joakim`, `forsmark`, `acme`). The public hostname will be `<installation-id>.voltini.cloud`. See [cloudflare-tunnel.md](cloudflare-tunnel.md) for the naming convention and reserved subdomains.
 
 ## 2. Assemble the credentials packet
 
@@ -22,7 +22,8 @@ Borzoi installation credentials — KEEP SECRET
 ================================================================
 
 Customer:         Acme Heating
-Public domain:    borzoi.acme.example
+Installation ID:  acme
+Public hostname:  acme.voltini.cloud
 Pi hardware:      Raspberry Pi 5, 8GB
 
 ─── ECR pull credentials (shared installer — same for all sites) ───
@@ -36,7 +37,7 @@ Paste this JSON block when setup.sh asks for it:
 }
 
 ─── Bootstrap admin ───
-Admin email:      admin@acme.example
+Admin email:      admin@acme.example (or customer's own email)
 (password is auto-generated during setup.sh and printed once)
 
 ─── Cloudflare Tunnel ───

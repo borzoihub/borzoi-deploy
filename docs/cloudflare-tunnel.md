@@ -2,6 +2,16 @@
 
 The default deployment model. The Pi binds only to `127.0.0.1:8080`, and Cloudflare Tunnel forwards public traffic from a Cloudflare-hosted hostname through an outbound connection that `cloudflared` maintains. No port forwarding, no public IP, no local TLS — Cloudflare handles HTTPS at its edge.
 
+## Hostname convention
+
+All installations live under `voltini.cloud` with the pattern:
+
+```
+<installation-id>.voltini.cloud
+```
+
+The `<installation-id>` is a short, URL-safe identifier chosen during onboarding — typically the customer name or site name (e.g. `joakim.voltini.cloud`, `forsmark.voltini.cloud`). The `voltini.cloud` domain is used exclusively for installations, so there is no risk of collisions with infrastructure subdomains.
+
 ## Why this model
 
 - **Firewall-safe**: the Pi makes outbound connections to Cloudflare; nothing listens on the public internet from your side.
@@ -13,13 +23,13 @@ The default deployment model. The Pi binds only to `127.0.0.1:8080`, and Cloudfl
 
 - A Cloudflare account (free tier is fine)
 - Zero Trust enabled on that account (free up to 50 users)
-- A domain on Cloudflare DNS (or a subdomain on one)
+- `voltini.cloud` added as a zone in Cloudflare DNS
 
 ## 1. Create the tunnel in the Zero Trust dashboard
 
 1. https://one.dash.cloudflare.com → **Networks** → **Tunnels** → **Create a tunnel**.
 2. Select connector type: **Cloudflared**.
-3. Name the tunnel (e.g. `borzoi-acme-heating`). Save.
+3. Name the tunnel to match the installation (e.g. `joakim`). Save.
 4. Pick the environment: **Debian** / **64-bit**. The dashboard will show a long install command that looks like:
    ```
    sudo cloudflared service install eyJhIjoi...
@@ -29,11 +39,11 @@ The default deployment model. The Pi binds only to `127.0.0.1:8080`, and Cloudfl
 > **Don't run the copied command directly.** `setup.sh` handles the install (including adding Cloudflare's apt repo) when you paste it. Running it manually first leads to two competing connector installations.
 
 5. Under **Public Hostnames** tab, add:
-   - **Subdomain**: e.g. `borzoi`
-   - **Domain**: (your zone)
+   - **Subdomain**: `<installation-id>` (e.g. `joakim`)
+   - **Domain**: `voltini.cloud`
    - **Type**: HTTP
    - **URL**: `localhost:8080`
-6. Save.
+6. Save. Cloudflare automatically creates the DNS CNAME record for `<installation-id>.voltini.cloud`.
 
 ## 2. Paste the token into `setup.sh`
 
@@ -59,10 +69,10 @@ Expected: log lines like `Connection ... registered connIndex=0 ...`.
 From a browser outside the Pi's network:
 
 ```
-https://borzoi.your-domain.com    ← your chosen public hostname
+https://joakim.voltini.cloud    ← your chosen public hostname
 ```
 
-You should reach the Borzoi login page. If you get a Cloudflare "tunnel offline" page, the `cloudflared` service isn't running or connected — check `journalctl`.
+You should reach the login page. If you get a Cloudflare "tunnel offline" page, the `cloudflared` service isn't running or connected — check `journalctl`.
 
 ## Running `setup.sh` without a token
 
@@ -102,8 +112,8 @@ The backend reads `BORZOI_BASE_URL` from `.env` when generating links inside out
 When email features become active, edit `.env` to use the Cloudflare-tunneled URL:
 
 ```bash
-BORZOI_DOMAIN=borzoi.your-domain.com
-BORZOI_BASE_URL=https://borzoi.your-domain.com
+BORZOI_DOMAIN=joakim.voltini.cloud
+BORZOI_BASE_URL=https://joakim.voltini.cloud
 ```
 
 Then:

@@ -25,7 +25,8 @@ End-to-end walkthrough from blank SD card to a working Borzoi login.
 **Cloudflare Tunnel** (optional but recommended):
 - A Zero Trust account (free tier is fine — https://one.dash.cloudflare.com)
 - A tunnel created in Networks → Tunnels → Create, with its connector token
-- A public hostname configured on that tunnel, pointing at `http://localhost:8080`
+- A public hostname configured on that tunnel: `<installation-id>.voltini.cloud` → `http://localhost:8080`
+- See [cloudflare-tunnel.md](cloudflare-tunnel.md) for the naming convention
 
 ## Step 1 — Flash Raspberry Pi OS
 
@@ -157,8 +158,8 @@ At the end, the admin credentials are printed **once**:
 
 ```
 ============================================================
-Borzoi admin login (save this — shown only once):
-  URL:      https://borzoi.acme.example
+Admin login (save this — shown only once):
+  URL:      https://acme.voltini.cloud
   Email:    admin@acme.example
   Password: aB3-Kf9s-VxLm-...
 ============================================================
