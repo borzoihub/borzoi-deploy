@@ -51,39 +51,16 @@ fi
 info "Pulling latest images..."
 docker compose pull
 
-# After pulling, resolve the actual semver tag for each image so that
+# Read the version from inside the pulled image and re-tag locally so that
 # "docker ps" shows the real version instead of ":latest".
-resolve_version_tag() {
-  local image=$1
-  # The latest image shares a digest with a semver-tagged image.
-  # Find that tag by matching digests among locally available tags.
-  local digest
-  digest=$(docker inspect --format '{{index .RepoDigests 0}}' "$image:latest" 2>/dev/null | cut -d@ -f2)
-  [ -z "$digest" ] && return
-  docker images "$image" --digests --format '{{.Tag}} {{.Digest}}' \
-    | grep -E '^[0-9]+\.[0-9]+\.[0-9]+ ' \
-    | grep "$digest" \
-    | awk '{print $1}' \
-    | sort -V \
-    | tail -1
-}
-
-# Pull with latest first, then try to find the versioned tag.
-# If we can resolve it, re-export so compose uses the versioned tag.
-BACKEND_VER=$(resolve_version_tag "$ECR_REGISTRY/borzoi-backend")
-FRONTEND_VER=$(resolve_version_tag "$ECR_REGISTRY/borzoi-frontend")
+BACKEND_VER=$(docker run --rm "$ECR_REGISTRY/borzoi-backend:latest" node -p "require('./package.json').version" 2>/dev/null)
 
 if [ -n "$BACKEND_VER" ]; then
+  docker tag "$ECR_REGISTRY/borzoi-backend:latest" "$ECR_REGISTRY/borzoi-backend:$BACKEND_VER"
   export BACKEND_TAG="$BACKEND_VER"
   info "Backend version: $BACKEND_VER"
 else
-  info "Backend version: latest (could not resolve semver tag)"
-fi
-if [ -n "$FRONTEND_VER" ]; then
-  export FRONTEND_TAG="$FRONTEND_VER"
-  info "Frontend version: $FRONTEND_VER"
-else
-  info "Frontend version: latest (could not resolve semver tag)"
+  info "Backend version: unknown (falling back to latest)"
 fi
 
 # ---------- restart with resolved tags --------------------------------------
