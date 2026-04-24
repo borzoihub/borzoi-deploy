@@ -46,9 +46,40 @@ else
   exit 1
 fi
 
+# ---------- resolve latest versions -----------------------------------------
+
+resolve_latest_tag() {
+  local repo=$1
+  # List image tags from ECR, pick the highest semver tag (ignore "latest").
+  aws ecr describe-images \
+    --profile borzoi-ecr \
+    --repository-name "$repo" \
+    --query 'imageDetails[*].imageTags[]' \
+    --output text \
+  | tr '\t' '\n' \
+  | grep -E '^[0-9]+\.[0-9]+\.[0-9]+$' \
+  | sort -V \
+  | tail -1
+}
+
+info "Resolving latest image versions from ECR..."
+
+BACKEND_TAG=$(resolve_latest_tag borzoi-backend)
+FRONTEND_TAG=$(resolve_latest_tag borzoi-frontend)
+
+if [ -z "$BACKEND_TAG" ] || [ -z "$FRONTEND_TAG" ]; then
+  err "Could not resolve latest version tags from ECR."
+  [ -z "$BACKEND_TAG" ] && err "  borzoi-backend: no semver tags found"
+  [ -z "$FRONTEND_TAG" ] && err "  borzoi-frontend: no semver tags found"
+  exit 1
+fi
+
+export BACKEND_TAG FRONTEND_TAG
+info "Backend: $BACKEND_TAG, Frontend: $FRONTEND_TAG"
+
 # ---------- pull + restart ---------------------------------------------------
 
-info "Pulling latest images..."
+info "Pulling images..."
 docker compose pull
 
 info "Restarting stack..."
