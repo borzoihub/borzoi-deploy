@@ -53,7 +53,7 @@ docker compose pull
 
 # Read the version from inside the pulled image and re-tag locally so that
 # "docker ps" shows the real version instead of ":latest".
-BACKEND_VER=$(docker run --rm "$ECR_REGISTRY/borzoi-backend:latest" node -p "require('./package.json').version" 2>/dev/null)
+BACKEND_VER=$(docker run --rm --entrypoint node "$ECR_REGISTRY/borzoi-backend:latest" -p "require('./package.json').version" 2>/dev/null)
 
 if [ -n "$BACKEND_VER" ]; then
   docker tag "$ECR_REGISTRY/borzoi-backend:latest" "$ECR_REGISTRY/borzoi-backend:$BACKEND_VER"
