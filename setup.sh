@@ -125,6 +125,48 @@ if [ -n "$ROOT_DISK" ]; then
   fi
 fi
 
+# ---------- WiFi power-save off --------------------------------------------
+# WiFi power save causes the Pi to miss inbound packets (ARP, TCP) when
+# idle, making the Cloudflare tunnel and LAN access unreliable. Disable it
+# permanently via NetworkManager (default on Raspbian Bookworm+).
+
+if command -v nmcli >/dev/null 2>&1; then
+  WIFI_CON=$(nmcli -t -f NAME,TYPE connection show | awk -F: '$2=="802-11-wireless"{print $1; exit}')
+  if [ -n "$WIFI_CON" ]; then
+    CURRENT_PS=$(nmcli -t -f 802-11-wireless.powersave connection show "$WIFI_CON" 2>/dev/null | cut -d: -f2)
+    if [ "$CURRENT_PS" != "2" ]; then
+      info "Disabling WiFi power save for connection '$WIFI_CON'..."
+      sudo nmcli connection modify "$WIFI_CON" 802-11-wireless.powersave 2
+      sudo nmcli connection down "$WIFI_CON" && sudo nmcli connection up "$WIFI_CON"
+      info "WiFi power save disabled."
+    else
+      info "WiFi power save already disabled."
+    fi
+  else
+    info "No WiFi connection found in NetworkManager — skipping power-save config."
+  fi
+else
+  # Fallback: create a systemd oneshot that disables power save at boot.
+  if iw wlan0 get power_save 2>/dev/null | grep -q "on"; then
+    info "Disabling WiFi power save via systemd service..."
+    sudo tee /etc/systemd/system/wifi-powersave-off.service >/dev/null <<'UNIT'
+[Unit]
+Description=Disable WiFi power save
+After=network.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/sbin/iw wlan0 set power_save off
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+    sudo systemctl enable --now wifi-powersave-off.service
+    info "WiFi power save disabled (systemd service installed)."
+  fi
+fi
+
 # ---------- existing .env handling ------------------------------------------
 
 if [ -f .env ]; then
@@ -255,6 +297,23 @@ if [ -n "${CLOUDFLARE_TUNNEL_INPUT:-}" ]; then
   fi
 else
   CLOUDFLARE_TUNNEL_TOKEN=""
+fi
+
+# If tunnel token provided, optionally configure routes + DNS via API.
+CF_API_TOKEN=""
+CF_HOSTNAME=""
+if [ -n "${CLOUDFLARE_TUNNEL_TOKEN:-}" ]; then
+  echo "" >&2
+  echo "To automatically configure tunnel routes (HTTP + SSH) and DNS records," >&2
+  echo "provide a Cloudflare API token with 'Cloudflare Tunnel:Edit' and" >&2
+  echo "'DNS:Edit' permissions. Leave blank to configure manually in the" >&2
+  echo "Zero Trust dashboard." >&2
+  echo "" >&2
+  read -rp "Cloudflare API token (or empty to skip): " CF_API_TOKEN >&2 || true
+
+  if [ -n "${CF_API_TOKEN:-}" ]; then
+    CF_HOSTNAME=$(ask "Public hostname for this Hub (e.g. pilot1.voltini.cloud)" "")
+  fi
 fi
 
 # ---------- optional AWS validation ----------------------------------------
@@ -495,8 +554,88 @@ if [ -n "${CLOUDFLARE_TUNNEL_TOKEN:-}" ]; then
     sudo cloudflared service uninstall || true
   fi
   sudo cloudflared service install "$CLOUDFLARE_TUNNEL_TOKEN"
-  info "cloudflared running. Configure the public hostname → http://localhost:8080"
-  info "in the Cloudflare Zero Trust dashboard."
+  info "cloudflared running."
+
+  # ---- Configure tunnel ingress + DNS via Cloudflare API (optional) ----
+  if [ -n "${CF_API_TOKEN:-}" ] && [ -n "${CF_HOSTNAME:-}" ]; then
+    CF_SSH_HOSTNAME="ssh-${CF_HOSTNAME}"
+
+    # Decode the tunnel token (URL-safe base64 JSON: {"a":"account","t":"tunnel","s":"secret"})
+    TUNNEL_JSON=$(printf '%s' "$CLOUDFLARE_TUNNEL_TOKEN" | \
+      awk '{
+        gsub(/-/, "+"); gsub(/_/, "/")
+        mod = length($0) % 4
+        if (mod == 2) $0 = $0 "=="
+        else if (mod == 3) $0 = $0 "="
+        print
+      }' | base64 -d 2>/dev/null || true)
+    CF_ACCOUNT_ID=$(extract_json_field "a" "$TUNNEL_JSON")
+    CF_TUNNEL_ID=$(extract_json_field "t" "$TUNNEL_JSON")
+
+    if [ -z "$CF_ACCOUNT_ID" ] || [ -z "$CF_TUNNEL_ID" ]; then
+      err "Could not extract account/tunnel ID from tunnel token."
+      err "Configure tunnel routes manually in the Cloudflare dashboard."
+    else
+      # Configure tunnel ingress: HTTP + SSH + catch-all
+      info "Configuring tunnel routes: $CF_HOSTNAME → http, $CF_SSH_HOSTNAME → ssh..."
+      INGRESS_RESP=$(curl -sS -X PUT \
+        "https://api.cloudflare.com/client/v4/accounts/${CF_ACCOUNT_ID}/cfd_tunnel/${CF_TUNNEL_ID}/configurations" \
+        -H "Authorization: Bearer ${CF_API_TOKEN}" \
+        -H "Content-Type: application/json" \
+        -d "{
+          \"config\": {
+            \"ingress\": [
+              {\"hostname\": \"${CF_HOSTNAME}\", \"service\": \"http://localhost:8080\"},
+              {\"hostname\": \"${CF_SSH_HOSTNAME}\", \"service\": \"ssh://127.0.0.1:22\"},
+              {\"service\": \"http_status:404\"}
+            ]
+          }
+        }" 2>&1)
+
+      if printf '%s' "$INGRESS_RESP" | grep -q '"success":true'; then
+        info "Tunnel ingress configured."
+      else
+        err "Failed to configure tunnel ingress:"
+        err "$INGRESS_RESP"
+        err "Configure manually in the Cloudflare dashboard."
+      fi
+
+      # Create DNS CNAME records pointing to the tunnel
+      CF_ZONE=$(printf '%s' "$CF_HOSTNAME" | awk -F. '{print $(NF-1)"."$NF}')
+      info "Looking up zone ID for $CF_ZONE..."
+      ZONE_RESP=$(curl -sS \
+        "https://api.cloudflare.com/client/v4/zones?name=${CF_ZONE}" \
+        -H "Authorization: Bearer ${CF_API_TOKEN}" 2>&1)
+      CF_ZONE_ID=$(printf '%s' "$ZONE_RESP" | grep -o '"id":"[^"]*"' | head -1 | cut -d'"' -f4)
+
+      if [ -n "$CF_ZONE_ID" ]; then
+        TUNNEL_CNAME="${CF_TUNNEL_ID}.cfargotunnel.com"
+        for hn in "$CF_HOSTNAME" "$CF_SSH_HOSTNAME"; do
+          info "Creating DNS CNAME: $hn → $TUNNEL_CNAME..."
+          DNS_RESP=$(curl -sS -X POST \
+            "https://api.cloudflare.com/client/v4/zones/${CF_ZONE_ID}/dns_records" \
+            -H "Authorization: Bearer ${CF_API_TOKEN}" \
+            -H "Content-Type: application/json" \
+            -d "{
+              \"type\": \"CNAME\",
+              \"name\": \"${hn}\",
+              \"content\": \"${TUNNEL_CNAME}\",
+              \"proxied\": true
+            }" 2>&1)
+          if printf '%s' "$DNS_RESP" | grep -q '"success":true'; then
+            info "DNS record created: $hn"
+          else
+            err "DNS record for $hn may already exist or failed. Check the dashboard."
+          fi
+        done
+      else
+        err "Could not find zone ID for $CF_ZONE. Create DNS records manually."
+      fi
+    fi
+  else
+    info "Configure the public hostname → http://localhost:8080"
+    info "in the Cloudflare Zero Trust dashboard."
+  fi
 else
   info "Cloudflare Tunnel skipped. The stack is reachable at http://localhost:8080"
   info "from the Pi itself; run 'cloudflared service install <token>' later"

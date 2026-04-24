@@ -54,6 +54,13 @@ docker compose pull
 info "Restarting stack..."
 docker compose up -d
 
+# Nginx reads templates only at container start. docker-compose up -d won't
+# restart nginx when only bind-mounted template files changed (the image and
+# compose config are unchanged). Force a restart so it picks up any updated
+# nginx templates from git.
+info "Restarting nginx to pick up template changes..."
+docker compose restart nginx
+
 # Clean up old images to prevent disk from filling up
 info "Pruning unused Docker images..."
 docker image prune -af
