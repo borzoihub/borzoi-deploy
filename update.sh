@@ -46,41 +46,47 @@ else
   exit 1
 fi
 
-# ---------- resolve latest versions -----------------------------------------
+# ---------- pull + resolve versions ------------------------------------------
 
-resolve_latest_tag() {
-  local repo=$1
-  # List image tags from ECR, pick the highest semver tag (ignore "latest").
-  aws ecr describe-images \
-    --profile borzoi-ecr \
-    --repository-name "$repo" \
-    --query 'imageDetails[*].imageTags[]' \
-    --output text \
-  | tr '\t' '\n' \
-  | grep -E '^[0-9]+\.[0-9]+\.[0-9]+$' \
-  | sort -V \
-  | tail -1
+info "Pulling latest images..."
+docker compose pull
+
+# After pulling, resolve the actual semver tag for each image so that
+# "docker ps" shows the real version instead of ":latest".
+resolve_version_tag() {
+  local image=$1
+  # The latest image shares a digest with a semver-tagged image.
+  # Find that tag by matching digests among locally available tags.
+  local digest
+  digest=$(docker inspect --format '{{index .RepoDigests 0}}' "$image:latest" 2>/dev/null | cut -d@ -f2)
+  [ -z "$digest" ] && return
+  docker images "$image" --digests --format '{{.Tag}} {{.Digest}}' \
+    | grep -E '^[0-9]+\.[0-9]+\.[0-9]+ ' \
+    | grep "$digest" \
+    | awk '{print $1}' \
+    | sort -V \
+    | tail -1
 }
 
-info "Resolving latest image versions from ECR..."
+# Pull with latest first, then try to find the versioned tag.
+# If we can resolve it, re-export so compose uses the versioned tag.
+BACKEND_VER=$(resolve_version_tag "$ECR_REGISTRY/borzoi-backend")
+FRONTEND_VER=$(resolve_version_tag "$ECR_REGISTRY/borzoi-frontend")
 
-BACKEND_TAG=$(resolve_latest_tag borzoi-backend)
-FRONTEND_TAG=$(resolve_latest_tag borzoi-frontend)
-
-if [ -z "$BACKEND_TAG" ] || [ -z "$FRONTEND_TAG" ]; then
-  err "Could not resolve latest version tags from ECR."
-  [ -z "$BACKEND_TAG" ] && err "  borzoi-backend: no semver tags found"
-  [ -z "$FRONTEND_TAG" ] && err "  borzoi-frontend: no semver tags found"
-  exit 1
+if [ -n "$BACKEND_VER" ]; then
+  export BACKEND_TAG="$BACKEND_VER"
+  info "Backend version: $BACKEND_VER"
+else
+  info "Backend version: latest (could not resolve semver tag)"
+fi
+if [ -n "$FRONTEND_VER" ]; then
+  export FRONTEND_TAG="$FRONTEND_VER"
+  info "Frontend version: $FRONTEND_VER"
+else
+  info "Frontend version: latest (could not resolve semver tag)"
 fi
 
-export BACKEND_TAG FRONTEND_TAG
-info "Backend: $BACKEND_TAG, Frontend: $FRONTEND_TAG"
-
-# ---------- pull + restart ---------------------------------------------------
-
-info "Pulling images..."
-docker compose pull
+# ---------- restart with resolved tags --------------------------------------
 
 info "Restarting stack..."
 docker compose up -d
