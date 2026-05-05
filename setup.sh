@@ -167,6 +167,50 @@ UNIT
   fi
 fi
 
+# ---------- DNS resilience --------------------------------------------------
+# dockerd uses the host's /etc/resolv.conf for ECR pulls. When the
+# customer's router DNS is slow or flaky, pulls fail mid-stream with
+# "i/o timeout" on the router IP. Override DNS on all wifi+ethernet
+# connection profiles to point at Cloudflare + Google public resolvers
+# and ignore DHCP-provided DNS. The Hub talks only to loopback and to
+# public services — it never needs to resolve LAN hostnames — so
+# dropping the router's resolver has no functional cost.
+
+DNS_V4="1.1.1.1 8.8.8.8"
+DNS_V6="2606:4700:4700::1111 2001:4860:4860::8888"
+
+if command -v nmcli >/dev/null 2>&1; then
+  # Read connection names line-by-line so names with spaces (e.g. the
+  # default Raspbian profile "Wired connection 1") survive intact.
+  while IFS=: read -r conn type; do
+    [ "$type" = "802-11-wireless" ] || [ "$type" = "802-3-ethernet" ] || continue
+    CUR_V4=$(nmcli -t -f ipv4.dns connection show "$conn" 2>/dev/null | cut -d: -f2-)
+    CUR_IGN=$(nmcli -t -f ipv4.ignore-auto-dns connection show "$conn" 2>/dev/null | cut -d: -f2)
+    NORM_CUR=$(echo "$CUR_V4" | tr ',' ' ' | xargs)
+    if [ "$NORM_CUR" = "1.1.1.1 8.8.8.8" ] && [ "$CUR_IGN" = "yes" ]; then
+      info "DNS already configured on connection '$conn'."
+      continue
+    fi
+    info "Setting DNS on connection '$conn' → $DNS_V4 (ignore router DNS)..."
+    sudo nmcli connection modify "$conn" \
+      ipv4.dns "$DNS_V4" \
+      ipv4.ignore-auto-dns yes \
+      ipv6.dns "$DNS_V6" \
+      ipv6.ignore-auto-dns yes
+    # Apply to the running device without dropping the connection
+    # (avoids killing in-progress SSH sessions during install).
+    DEV=$(nmcli -t -f NAME,DEVICE connection show --active 2>/dev/null | \
+      awk -F: -v c="$conn" '$1==c{print $2; exit}')
+    if [ -n "$DEV" ]; then
+      sudo nmcli device reapply "$DEV" >/dev/null 2>&1 || true
+    fi
+    info "DNS configured on '$conn'."
+  done < <(nmcli -t -f NAME,TYPE connection show)
+else
+  info "nmcli not available — skipping DNS override."
+  info "If pulls fail with DNS timeouts, set /etc/resolv.conf to 1.1.1.1 manually."
+fi
+
 # ---------- existing .env handling ------------------------------------------
 
 if [ -f .env ]; then
