@@ -410,7 +410,7 @@ info ".env written (mode 600)."
 
 # ---------- directories ----------------------------------------------------
 
-mkdir -p data/postgres data/backups certbot/conf certbot/www nginx/templates
+mkdir -p data/postgres data/backups nginx/templates
 
 # ---------- ECR credential helper -----------------------------------------
 # Two-profile setup: the ECR pull credentials live in a borzoi-specific

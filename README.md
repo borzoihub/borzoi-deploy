@@ -112,28 +112,12 @@ backend can't tolerate, restore from a backup (see below).
 
 ## TLS
 
-Initial install exposes plain HTTP so Let's Encrypt can answer the
-webroot challenge. Once DNS is pointed at the host:
+The default install does **not** terminate TLS on the Pi — the docker
+stack's nginx binds `127.0.0.1:8080` plain HTTP, and TLS is terminated
+externally by Cloudflare Tunnel. See [docs/cloudflare-tunnel.md](docs/cloudflare-tunnel.md).
 
-```bash
-docker run --rm \
-  -v /opt/borzoi/certbot/conf:/etc/letsencrypt \
-  -v /opt/borzoi/certbot/www:/var/www/certbot \
-  certbot/certbot certonly --webroot -w /var/www/certbot \
-  -d $BORZOI_DOMAIN --email admin@$BORZOI_DOMAIN --agree-tos --no-eff-email
-```
-
-Then uncomment the HTTPS `server { ... }` block (and the HTTP→HTTPS
-redirect line) in `nginx/templates/default.conf.template` and restart
-nginx:
-
-```bash
-docker compose restart nginx
-```
-
-Renewal (cron or systemd timer): run the same `certbot renew`
-invocation periodically and `docker compose exec nginx nginx -s reload`
-afterwards.
+There is no Let's Encrypt / certbot wiring in the docker-compose stack.
+For the legacy direct-internet setup (not recommended), see [docs/tls.md](docs/tls.md).
 
 ## Backup
 

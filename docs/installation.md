@@ -147,7 +147,7 @@ What happens after the prompts:
 1. **Credential validation** — if `aws-cli` is installed, the ECR creds are tested with `sts get-caller-identity`. If validation fails, you can re-enter.
 2. **Secret generation** — DB password (32 chars), JWT secret (48 chars), bootstrap admin password (24 chars) are auto-generated.
 3. **.env written** to `/opt/borzoi/.env`, mode 600.
-4. **Directories created** — `data/postgres`, `certbot/conf`, `certbot/www`, `nginx/templates`.
+4. **Directories created** — `data/postgres`, `data/backups`, `nginx/templates`.
 5. **AWS profile installed** — ECR creds written to `~/.aws/credentials` under `[borzoi-ecr]`. Any existing AWS profiles are preserved.
 6. **ECR credential helper wired up** — a wrapper at `/usr/local/bin/docker-credential-borzoi-ecr-login` is installed (requires sudo), and `~/.docker/config.json` is configured to use it.
 7. **Images pulled** — `docker compose pull`.

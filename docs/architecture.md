@@ -81,10 +81,10 @@ If/when S3 or SES become active in the product, each customer needs a per-custom
 ├── docker-compose.yml         # from the git repo
 ├── install.sh / setup.sh      # from the git repo
 ├── nginx/templates/           # nginx config templates (envsubst)
-├── data/postgres/             # TimescaleDB data (volume)
-├── certbot/conf/              # Let's Encrypt certs (after TLS setup)
-└── certbot/www/               # webroot challenge path
+└── data/postgres/             # TimescaleDB data (volume)
 ```
+
+TLS is terminated externally by Cloudflare Tunnel (see [cloudflare-tunnel.md](cloudflare-tunnel.md)). No Let's Encrypt / certbot files live on the Pi.
 
 Outside `/opt/borzoi`:
 
