@@ -37,6 +37,47 @@ What happens:
 
 Expected downtime: **~10-20 seconds** (backend restart + first-tick warmup).
 
+## OTA upgrade from the installer portal
+
+The same pull-and-restart can be triggered remotely from the Voltini installer
+portal ("Uppdatera hubben" on the installation's Overview tab) instead of over
+SSH. It runs through the **`updater` sidecar** container:
+
+```
+portal → voltini-backend → (SSO) → borzoi-backend POST /api/installer/upgrade
+       → writes data/upgrade/request.json
+updater sidecar (this Pi) → backup → ECR login → docker compose pull
+       → docker compose up -d (runtime services only) → status.json
+portal polls GET /api/installer/upgrade-status until success/failed
+```
+
+Details:
+- The sidecar is built locally from [`../updater/Dockerfile`](../updater/Dockerfile)
+  (docker CLI + compose + aws-cli) and runs [`../scripts/updater.sh`](../scripts/updater.sh).
+  It is **never pushed to a registry**.
+- It authenticates to ECR itself (`aws ecr get-login-password` using the
+  `[borzoi-ecr]` profile under `HOST_AWS_DIR`), then pulls + recreates
+  **only the runtime services** (`postgres backend frontend nginx`) — it
+  **excludes itself** so it isn't recreated mid-upgrade.
+- Progress lives in `data/upgrade/status.json`, which is on a bind mount and
+  therefore survives the backend container being recreated mid-upgrade. The
+  sidecar touches `data/upgrade/capable` every loop; the backend reports
+  `otaSupported: true` only while that marker is fresh.
+
+**This requires the Docker-Compose deployment.** A Hub running `borzoi-backend`
+from a git checkout (no compose, no sidecar) reports `otaSupported: false`,
+and the portal shows "updates disabled" instead of an upgrade button — update
+those the manual way (`git pull`).
+
+**Upgrading the updater image itself:** because the OTA flow excludes the
+`updater` service, a new updater image is not applied by an OTA upgrade. Apply
+it on the next manual update, or explicitly:
+
+```bash
+cd /opt/borzoi
+docker compose build updater && docker compose up -d updater
+```
+
 ## Pin a specific version
 
 By default both `BACKEND_TAG` and `FRONTEND_TAG` in `.env` are `latest`. To pin:

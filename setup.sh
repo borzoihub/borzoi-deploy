@@ -422,6 +422,12 @@ ECR_REGISTRY=$ECR_REGISTRY
 BACKEND_TAG=latest
 FRONTEND_TAG=latest
 
+# OTA updater sidecar — needs the install dir and the operator's AWS dir as
+# absolute host paths (compose interpolates these; the updater mounts the
+# project at its real host path so relative bind mounts resolve correctly).
+INSTALL_DIR=$(pwd)
+HOST_AWS_DIR=$HOME/.aws
+
 # Public URL / domain
 BORZOI_DOMAIN=$BORZOI_DOMAIN
 BORZOI_BASE_URL=$BORZOI_BASE_URL
@@ -454,7 +460,7 @@ info ".env written (mode 600)."
 
 # ---------- directories ----------------------------------------------------
 
-mkdir -p data/postgres data/backups nginx/templates
+mkdir -p data/postgres data/backups data/upgrade nginx/templates
 
 # ---------- ECR credential helper -----------------------------------------
 # Two-profile setup: the ECR pull credentials live in a borzoi-specific

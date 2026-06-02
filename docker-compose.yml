@@ -29,6 +29,34 @@ services:
     depends_on:
       postgres: { condition: service_healthy }
     env_file: .env
+    volumes:
+      # Shared OTA-upgrade channel with the updater sidecar: the backend
+      # writes request.json and reads status.json + the capability marker.
+      - ./data/upgrade:/data/upgrade
+    networks: [borzoi]
+
+  # OTA updater sidecar — executes portal-triggered upgrades. Built locally
+  # from ./updater (never pushed to a registry). It watches
+  # data/upgrade/request.json and runs the backup → pull → up sequence via
+  # the mounted Docker socket, writing progress to data/upgrade/status.json.
+  # See scripts/updater.sh and docs/updating.md.
+  #
+  # The project is mounted at its REAL host path (${INSTALL_DIR}) so compose's
+  # relative bind mounts resolve identically whether run from the host or
+  # from inside this container. No published ports — the only trigger is the
+  # local request file written by the (SSO-gated) backend.
+  updater:
+    build: ./updater
+    image: borzoi-updater:local
+    container_name: borzoi-updater
+    restart: unless-stopped
+    env_file: .env
+    working_dir: ${INSTALL_DIR}
+    entrypoint: ["bash", "./scripts/updater.sh"]
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ${INSTALL_DIR}:${INSTALL_DIR}
+      - ${HOST_AWS_DIR}:/root/.aws:ro
     networks: [borzoi]
 
   frontend:
