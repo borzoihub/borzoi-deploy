@@ -42,6 +42,7 @@ set -a
 set +a
 
 STARTED_AT=""
+LOGIN_ERR=""
 
 # Emit a JSON string literal, or `null` for an empty value (with escaping).
 json_str() {
@@ -73,12 +74,28 @@ write_status() {
 }
 
 ecr_login() {
-  [ -n "${ECR_REGISTRY:-}" ] || { echo "updater: ECR_REGISTRY not set" >&2; return 1; }
+  LOGIN_ERR=""
+  if [ -z "${ECR_REGISTRY:-}" ]; then
+    LOGIN_ERR="ECR_REGISTRY not set in .env"
+    echo "updater: $LOGIN_ERR" >&2
+    return 1
+  fi
   # ECR registry host is <account>.dkr.ecr.<region>.amazonaws.com
-  local region
+  local region pw out
   region="$(printf '%s' "$ECR_REGISTRY" | cut -d. -f4)"
-  aws ecr get-login-password --profile borzoi-ecr --region "$region" \
-    | docker login --username AWS --password-stdin "$ECR_REGISTRY"
+
+  # Capture the real reason (creds not found, TLS/cert, IAM, …) so it lands
+  # in status.json + these logs instead of a generic "login failed".
+  if ! pw="$(aws ecr get-login-password --profile borzoi-ecr --region "$region" 2>&1)"; then
+    LOGIN_ERR="aws get-login-password: $pw"
+    echo "updater: $LOGIN_ERR" >&2
+    return 1
+  fi
+  if ! out="$(printf '%s' "$pw" | docker login --username AWS --password-stdin "$ECR_REGISTRY" 2>&1)"; then
+    LOGIN_ERR="docker login: $out"
+    echo "updater: $LOGIN_ERR" >&2
+    return 1
+  fi
 }
 
 run_upgrade() {
@@ -96,7 +113,7 @@ run_upgrade() {
   #    the locally-built `updater` image.
   write_status running pull "" ""
   if ! ecr_login; then
-    write_status failed pull "" "ECR login failed"
+    write_status failed pull "" "ECR login failed: ${LOGIN_ERR:-unknown}"
     return
   fi
   if ! docker compose pull postgres backend frontend nginx; then
