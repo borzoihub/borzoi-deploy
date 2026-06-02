@@ -48,6 +48,10 @@ services:
   updater:
     build: ./updater
     image: borzoi-updater:local
+    # Built locally, never pushed — tell compose to build (not pull) it, so a
+    # bare `docker compose pull` (update.sh / operator habit) skips it instead
+    # of failing with "pull access denied for borzoi-updater".
+    pull_policy: build
     container_name: borzoi-updater
     restart: unless-stopped
     env_file: .env

@@ -49,7 +49,10 @@ fi
 # ---------- pull + resolve versions ------------------------------------------
 
 info "Pulling latest images..."
-docker compose pull
+# Pull the runtime services explicitly — the `updater` sidecar is built
+# locally (pull_policy: build), so a bare `docker compose pull` would fail
+# trying to fetch borzoi-updater from a registry.
+docker compose pull postgres backend frontend nginx
 
 # Read the version from inside the pulled image and re-tag locally so that
 # "docker ps" shows the real version instead of ":latest".
