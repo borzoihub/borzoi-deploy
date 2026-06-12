@@ -34,6 +34,15 @@ REQUEST="$UPGRADE_DIR/request.json"
 STATUS="$UPGRADE_DIR/status.json"
 POLL_SECONDS="${UPDATER_POLL_SECONDS:-10}"
 
+# Which compose services this updater pulls + recreates, and whether it takes a
+# pre-update DB backup. Defaults reproduce the full-Hub behavior exactly; the
+# sim-node compose overrides them (OTA_SERVICES=sim, OTA_BACKUP=0) since a sim
+# node has no database and only the one `sim` service. The updater service
+# itself is always excluded from the recreate (`--no-deps` + explicit list) so
+# it never recreates itself mid-run.
+OTA_SERVICES="${OTA_SERVICES:-postgres backend frontend nginx}"
+OTA_BACKUP="${OTA_BACKUP:-1}"
+
 mkdir -p "$UPGRADE_DIR"
 
 # .env carries ECR_REGISTRY (+ DB_USER / DB_NAME for the backup script).
@@ -101,14 +110,17 @@ ecr_login() {
 run_upgrade() {
   STARTED_AT="$(now_iso)"
 
-  # 1. Pre-update backup (same script the nightly cron uses).
-  write_status running backup "" ""
-  if ! bash "$INSTALL_DIR/scripts/db-backup.sh"; then
-    write_status failed backup "" "Pre-update backup failed"
-    return
+  # 1. Pre-update backup (same script the nightly cron uses). Skipped when
+  #    OTA_BACKUP=0 (e.g. a sim node, which has no database to dump).
+  if [ "$OTA_BACKUP" != "0" ]; then
+    write_status running backup "" ""
+    if ! bash "$INSTALL_DIR/scripts/db-backup.sh"; then
+      write_status failed backup "" "Pre-update backup failed"
+      return
+    fi
   fi
 
-  # 2. Authenticate to ECR and pull the runtime images. We pull the runtime
+  # 2. Authenticate to ECR and pull the runtime images. We pull the configured
   #    services explicitly (NOT a bare `pull`) so compose never tries to pull
   #    the locally-built `updater` image.
   write_status running pull "" ""
@@ -116,7 +128,7 @@ run_upgrade() {
     write_status failed pull "" "ECR login failed: ${LOGIN_ERR:-unknown}"
     return
   fi
-  if ! docker compose pull postgres backend frontend nginx; then
+  if ! docker compose pull $OTA_SERVICES; then
     write_status failed pull "" "docker compose pull failed"
     return
   fi
@@ -136,12 +148,15 @@ run_upgrade() {
   #    itself (`--no-deps` + an explicit service list), so this container is
   #    never recreated mid-run and can finish writing status.
   write_status running restart "$target" ""
-  if ! docker compose up -d --no-deps postgres backend frontend nginx; then
+  if ! docker compose up -d --no-deps $OTA_SERVICES; then
     write_status failed restart "$target" "docker compose up failed"
     return
   fi
-  # nginx only re-reads its templates on container start.
-  docker compose restart nginx >/dev/null 2>&1 || true
+  # nginx only re-reads its templates on container start (Hub only; a sim
+  # node's OTA_SERVICES has no nginx, so this no-ops there).
+  case " $OTA_SERVICES " in
+    *" nginx "*) docker compose restart nginx >/dev/null 2>&1 || true ;;
+  esac
 
   # 4. Reclaim disk from the superseded images.
   docker image prune -af >/dev/null 2>&1 || true

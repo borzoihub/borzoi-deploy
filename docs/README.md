@@ -18,6 +18,10 @@ For each new customer Pi you deploy:
 5. **[Cloudflare Tunnel](cloudflare-tunnel.md)** — default public-exposure model
 6. **[TLS setup](tls.md)** — only for direct-internet installs (not recommended)
 
+## Simulation nodes
+
+8. **[Sim nodes](sim-nodes.md)** — install a simulation worker (`BORZOI_MODE=sim`), its OTA flow, and publishing the multi-arch image
+
 ## Operations
 
 6. **[Updating](updating.md)** — roll out a new release, pin a version, roll back
@@ -35,5 +39,7 @@ For each new customer Pi you deploy:
 | Public exposure via Cloudflare | [cloudflare-tunnel.md](cloudflare-tunnel.md) |
 | Direct-internet TLS (rare) | [tls.md](tls.md) |
 | Updates and rollback | [updating.md](updating.md) |
+| Install a simulation worker node | [sim-nodes.md](sim-nodes.md) |
+| Publishing a multi-arch image | [sim-nodes.md#operator-publishing-a-multi-arch-image](sim-nodes.md#operator-publishing-a-multi-arch-image) |
 | ECR pull failures | [troubleshooting.md#ecr-pull-failures](troubleshooting.md#ecr-pull-failures) |
 | Scheduler not activating | [troubleshooting.md#backend-logs-waiting-for-required-settings](troubleshooting.md#backend-logs-waiting-for-required-settings) |

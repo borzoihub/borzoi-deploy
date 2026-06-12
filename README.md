@@ -66,6 +66,15 @@ pull credentials** (a shared installer IAM user), and an admin email.
 It auto-generates the DB password, JWT secret, and bootstrap admin
 password.
 
+### Simulation nodes
+
+To run a host as a **simulation worker** instead of a full Hub, clone
+this repo and run `./install-sim.sh` (paste the sim bundle JSON when
+prompted). A sim node is the same `borzoi-backend` image in
+`BORZOI_MODE=sim` — no DB/frontend/nginx — that pulls work from the
+central job queue and self-updates OTA. See
+[docs/sim-nodes.md](docs/sim-nodes.md).
+
 ECR creds are stored in `~/.aws/credentials` under the `[borzoi-ecr]`
 profile, used by a wrapper around `amazon-ecr-credential-helper` so
 `docker pull` works indefinitely without manual token refresh.
