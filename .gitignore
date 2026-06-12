@@ -2,6 +2,8 @@
 .env.backup.*
 installer-creds.json
 installer-creds.*.json
+sim-bundle.json
+sim-bundle.*.json
 data/
 certbot/conf/
 certbot/www/

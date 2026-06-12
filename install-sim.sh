@@ -125,30 +125,48 @@ if [ -f .env ]; then
   info "Backed up existing .env → $backup"
 fi
 
-# ---------- prompts ---------------------------------------------------------
+# ---------- obtain the sim bundle -------------------------------------------
+# Source order (first hit wins), so fleet rollout needs no interaction:
+#   1. a file path argument:   ./install-sim.sh sim-bundle.json
+#   2. $SIM_BUNDLE_FILE        (path to a bundle file)
+#   3. $SIM_BUNDLE_JSON        (the bundle JSON inline)
+#   4. interactive paste       (fallback)
+# Build the bundle once with ./make-sim-bundle.sh (reuses installer-creds.json).
 
-echo "" >&2
-echo "Borzoi sim-node setup." >&2
-echo "" >&2
-echo "Paste the SIM BUNDLE JSON (produced on the operator machine). End the" >&2
-echo "paste with Ctrl-D on a blank line." >&2
-echo "" >&2
-echo "Shape expected (values will differ):" >&2
-echo "  {" >&2
-echo "    \"ecr_region\":        \"eu-north-1\"," >&2
-echo "    \"ecr_registry\":      \"<account>.dkr.ecr.<region>.amazonaws.com\"," >&2
-echo "    \"access_key_id\":     \"AKIA...\"," >&2
-echo "    \"secret_access_key\": \"...\"," >&2
-echo "    \"coordinator_url\":   \"https://api.voltini.energy\"," >&2
-echo "    \"worker_token\":      \"<long-lived WorkerService JWT>\"" >&2
-echo "  }" >&2
-echo "" >&2
-echo "(Paste now, then Ctrl-D):" >&2
-
-BUNDLE_JSON=$(cat)
+BUNDLE_FILE="${1:-${SIM_BUNDLE_FILE:-}}"
+BUNDLE_NONINTERACTIVE=0
+if [ -n "$BUNDLE_FILE" ]; then
+  [ -r "$BUNDLE_FILE" ] || { err "sim bundle file not readable: $BUNDLE_FILE"; exit 1; }
+  BUNDLE_JSON=$(cat "$BUNDLE_FILE")
+  BUNDLE_NONINTERACTIVE=1
+  info "Using sim bundle from $BUNDLE_FILE"
+elif [ -n "${SIM_BUNDLE_JSON:-}" ]; then
+  BUNDLE_JSON="$SIM_BUNDLE_JSON"
+  BUNDLE_NONINTERACTIVE=1
+  info "Using sim bundle from \$SIM_BUNDLE_JSON"
+else
+  echo "" >&2
+  echo "Borzoi sim-node setup." >&2
+  echo "" >&2
+  echo "Paste the SIM BUNDLE JSON (build it with ./make-sim-bundle.sh on the" >&2
+  echo "operator machine). End the paste with Ctrl-D on a blank line." >&2
+  echo "" >&2
+  echo "Shape expected (values will differ):" >&2
+  echo "  {" >&2
+  echo "    \"ecr_region\":        \"eu-north-1\"," >&2
+  echo "    \"ecr_registry\":      \"<account>.dkr.ecr.<region>.amazonaws.com\"," >&2
+  echo "    \"access_key_id\":     \"AKIA...\"," >&2
+  echo "    \"secret_access_key\": \"...\"," >&2
+  echo "    \"coordinator_url\":   \"https://api.voltini.energy\"," >&2
+  echo "    \"worker_token\":      \"<long-lived WorkerService JWT>\"" >&2
+  echo "  }" >&2
+  echo "" >&2
+  echo "(Paste now, then Ctrl-D):" >&2
+  BUNDLE_JSON=$(cat)
+fi
 
 if [ -z "$BUNDLE_JSON" ]; then
-  err "Empty input. Paste the sim bundle JSON and try again."
+  err "Empty sim bundle. Provide a bundle file/env or paste the JSON."
   exit 1
 fi
 
@@ -179,8 +197,15 @@ info "Coordinator: $COORDINATOR_URL"
 # the Background jobs page. Leave max-concurrent blank to let the node pick
 # cores-1 automatically.
 DEFAULT_NODE_ID="$(hostname 2>/dev/null || echo sim-node)"
-JOB_NODE_ID=$(ask "Node id (shown on the Background jobs page)" "$DEFAULT_NODE_ID")
-JOB_MAX_CONCURRENT=$(ask "Max concurrent jobs (blank = cores-1, auto)" "")
+if [ "$BUNDLE_NONINTERACTIVE" = "1" ]; then
+  # Scripted rollout: no prompts. Honor env overrides, else sane defaults.
+  JOB_NODE_ID="${JOB_NODE_ID:-$DEFAULT_NODE_ID}"
+  JOB_MAX_CONCURRENT="${JOB_MAX_CONCURRENT:-}"
+  info "Node id: $JOB_NODE_ID (non-interactive)"
+else
+  JOB_NODE_ID=$(ask "Node id (shown on the Background jobs page)" "$DEFAULT_NODE_ID")
+  JOB_MAX_CONCURRENT=$(ask "Max concurrent jobs (blank = cores-1, auto)" "")
+fi
 
 # ---------- optional ECR credential validation -----------------------------
 
