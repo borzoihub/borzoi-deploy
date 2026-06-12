@@ -204,7 +204,18 @@ if [ "$BUNDLE_NONINTERACTIVE" = "1" ]; then
   info "Node id: $JOB_NODE_ID (non-interactive)"
 else
   JOB_NODE_ID=$(ask "Node id (shown on the Background jobs page)" "$DEFAULT_NODE_ID")
-  JOB_MAX_CONCURRENT=$(ask "Max concurrent jobs (blank = cores-1, auto)" "")
+  # Optional: a positive integer, or BLANK for auto (cores-1). Read directly so
+  # an empty answer is accepted — `ask` with an empty default treats blank as
+  # "required" and would never let you move on. A non-numeric value (e.g. the
+  # literal "cores-1") would serialize to null on the claim and be rejected.
+  while :; do
+    read -rp "Max concurrent jobs — a NUMBER, or just press Enter for auto: " JOB_MAX_CONCURRENT >&2 || true
+    case "$JOB_MAX_CONCURRENT" in
+      "")            break ;;                       # blank = auto (cores-1)
+      *[!0-9]*|0)    echo "  enter a positive whole number (e.g. 5), or press Enter for auto" >&2 ;;
+      *)             break ;;
+    esac
+  done
 fi
 
 # ---------- optional ECR credential validation -----------------------------
