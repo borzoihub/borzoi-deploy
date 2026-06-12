@@ -128,6 +128,12 @@ run_upgrade() {
     write_status failed pull "" "ECR login failed: ${LOGIN_ERR:-unknown}"
     return
   fi
+  # Always resolve `latest` fresh. This function runs in the updater's
+  # long-lived loop process, so the `export BACKEND_TAG="$target"` below would
+  # otherwise leak the previously-resolved version into the next run's pull —
+  # pinning it to a stale tag instead of `latest` (so a node would re-pull the
+  # version it already runs and never see a newer publish).
+  export BACKEND_TAG=latest
   if ! docker compose pull $OTA_SERVICES; then
     write_status failed pull "" "docker compose pull failed"
     return
