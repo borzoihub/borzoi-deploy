@@ -103,6 +103,18 @@ else
   info "Latest published version: unknown (using :latest)"
 fi
 
+# ---------- ensure the OTA updater sidecar exists ---------------------------
+# install-sim.sh brings up BOTH sim + updater; this script only touches `sim`.
+# A node first started via update-sim.sh (or one whose updater was removed)
+# would otherwise have no `borzoi-sim-updater` container — OTA `update` jobs
+# drain but nothing acts on data/upgrade/request.json, so OTA silently dies.
+# Run this in EVERY path (incl. the no-op short-circuit below). pull_policy is
+# `build`, so this builds borzoi-updater:local if missing and is a no-op if the
+# sidecar is already up. Bare `up -d updater` won't recreate the running `sim`.
+
+info "Ensuring OTA updater sidecar is up..."
+dc up -d updater
+
 # ---------- no-op short-circuit ---------------------------------------------
 # If the running container is already on the pulled image, recreating it would
 # only restart the same version. Skip unless --force was given.
