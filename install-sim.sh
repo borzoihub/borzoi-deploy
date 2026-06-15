@@ -286,12 +286,15 @@ umask 077
 touch "$HOME/.aws/credentials" "$HOME/.aws/config"
 chmod 600 "$HOME/.aws/credentials" "$HOME/.aws/config"
 
-# Remove any previous [borzoi-ecr] block, then append fresh values (awk
-# in-place rewrite leaves other profiles intact).
+# Remove any previous borzoi-ecr block, then append fresh values (awk
+# in-place rewrite leaves other profiles intact). The header differs by file:
+# credentials uses `[borzoi-ecr]`, config uses `[profile borzoi-ecr]` — match
+# BOTH (optional `profile ` prefix), or the config block is never removed and a
+# duplicate section is appended every run → aws "Unable to parse config file".
 for f in "$HOME/.aws/credentials" "$HOME/.aws/config"; do
   awk '
     BEGIN { skip = 0 }
-    /^\[borzoi-ecr\][[:space:]]*$/ { skip = 1; next }
+    /^\[(profile[[:space:]]+)?borzoi-ecr\][[:space:]]*$/ { skip = 1; next }
     /^\[/ && skip == 1 { skip = 0 }
     skip == 0 { print }
   ' "$f" > "$f.tmp" && mv "$f.tmp" "$f"
