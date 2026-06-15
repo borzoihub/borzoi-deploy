@@ -313,8 +313,15 @@ if ! command -v docker-credential-ecr-login >/dev/null 2>&1; then
   if command -v apt-get >/dev/null 2>&1; then
     sudo apt-get update
     sudo apt-get install -y amazon-ecr-credential-helper
+  elif command -v dnf >/dev/null 2>&1; then
+    # Amazon Linux 2023 / Fedora / RHEL 8+.
+    sudo dnf install -y amazon-ecr-credential-helper
+  elif command -v yum >/dev/null 2>&1; then
+    # Amazon Linux 2 / older RHEL/CentOS.
+    sudo yum install -y amazon-ecr-credential-helper
   else
-    err "amazon-ecr-credential-helper not installed and apt-get unavailable."
+    err "amazon-ecr-credential-helper not installed and no supported package"
+    err "manager (apt-get / dnf / yum) found."
     err "Install manually: https://github.com/awslabs/amazon-ecr-credential-helper"
     exit 1
   fi
@@ -340,7 +347,10 @@ if ! command -v docker-credential-borzoi-ecr-login >/dev/null 2>&1; then
 fi
 if ! command -v docker-credential-ecr-login >/dev/null 2>&1; then
   err "amazon-ecr-credential-helper is not installed correctly (docker-credential-ecr-login missing from PATH)."
-  err "Try: sudo apt-get install --reinstall amazon-ecr-credential-helper"
+  err "Reinstall it with your package manager and re-run, e.g.:"
+  err "  apt-get install --reinstall amazon-ecr-credential-helper   (Debian/Ubuntu)"
+  err "  dnf reinstall amazon-ecr-credential-helper                 (Amazon Linux 2023 / RHEL)"
+  err "  yum reinstall amazon-ecr-credential-helper                 (Amazon Linux 2)"
   exit 1
 fi
 
