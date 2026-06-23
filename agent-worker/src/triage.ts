@@ -1,0 +1,98 @@
+import { z } from "zod";
+import type { ClaudeRunner } from "./claude.js";
+import type { IssueDetail } from "./github.js";
+import { triageSystemPrompt, triagePrompt } from "./prompts.js";
+
+/**
+ * One repo the fix needs to touch, with the scope of work specific to it.
+ * A single support case can span several repos (e.g. a shared `*-common` model
+ * change plus the backend and frontend that consume it), each becoming its own
+ * branch + pull request.
+ */
+const RepoTargetSchema = z.object({
+  repoKey: z.string(),
+  scope: z.string(),
+});
+
+const TriageSchema = z.object({
+  fixable: z.boolean(),
+  repos: z.array(RepoTargetSchema),
+  reason: z.string(),
+});
+
+export interface RepoTarget {
+  repoKey: string;
+  scope: string;
+}
+
+export interface TriageResult {
+  fixable: boolean;
+  /** Every repo the fix must touch, validated against what's available. */
+  repos: RepoTarget[];
+  /** repoKeys triage named that are NOT cloned in REPOS_DIR. */
+  missingRepoKeys: string[];
+  reason: string;
+}
+
+// Triage may read across several repos to spot cross-repo (`*-common`) work, so
+// it needs more turns than a single-file glance.
+const TRIAGE_MAX_TURNS = 25;
+
+/**
+ * Decide whether a support case should be fixed in code and, if so, in which
+ * repos. Read-only: the session reasons over the issue and the available repos
+ * (including how they depend on each other via shared `*-common` packages) and
+ * returns a structured verdict listing every repo that needs a change.
+ */
+export async function triage(
+  runner: ClaudeRunner,
+  reposDir: string,
+  availableRepoKeys: string[],
+  issue: IssueDetail,
+): Promise<TriageResult> {
+  console.log(
+    `[triage] #${issue.number}: available repos = [${availableRepoKeys.join(", ") || "none"}]`,
+  );
+  const result = await runner.run({
+    label: `triage #${issue.number}`,
+    cwd: reposDir,
+    systemPrompt: triageSystemPrompt(availableRepoKeys),
+    prompt: triagePrompt(issue),
+    maxTurns: TRIAGE_MAX_TURNS,
+    outputSchema: z.toJSONSchema(TriageSchema) as Record<string, unknown>,
+  });
+
+  if (result.isError) {
+    throw new Error(`Triage session failed for issue #${issue.number}`);
+  }
+
+  const parsed = TriageSchema.safeParse(result.structuredOutput);
+  if (!parsed.success) {
+    throw new Error(
+      `Triage returned malformed output for #${issue.number}: ${parsed.error.message}`,
+    );
+  }
+
+  // Split named repos into present (workable) and missing (not cloned). Dedupe
+  // by repoKey, keeping the first scope, and never trust a repo not present.
+  const available = new Set(availableRepoKeys);
+  const seen = new Set<string>();
+  const repos: RepoTarget[] = [];
+  const missingRepoKeys: string[] = [];
+  for (const t of parsed.data.repos) {
+    if (seen.has(t.repoKey)) continue;
+    seen.add(t.repoKey);
+    if (available.has(t.repoKey)) {
+      repos.push({ repoKey: t.repoKey, scope: t.scope });
+    } else {
+      missingRepoKeys.push(t.repoKey);
+    }
+  }
+
+  return {
+    fixable: parsed.data.fixable,
+    repos,
+    missingRepoKeys,
+    reason: parsed.data.reason,
+  };
+}

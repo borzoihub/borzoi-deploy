@@ -1,0 +1,30 @@
+# Standalone compose file for the Voltini support-case resolver.
+#
+# Deliberately NOT part of docker-compose.yml (the customer Hub stack) — this is
+# an internal maintainer tool that runs on a dedicated box, never on a customer
+# Raspberry Pi.
+#
+# Fresh-box runbook:
+#   1. git pull
+#   2. cp agent-worker/.env.example agent-worker/.env   # then fill in secrets
+#   3. printf '%s' "<github-pat>" > agent-worker/.ghtoken   # for npm GitHub Packages auth
+#   4. mkdir -p agent-data/repos && git clone <each repo> into agent-data/repos/
+#   5. docker compose -f docker-compose.agent.yml up -d --build
+#
+services:
+  agent-worker:
+    build:
+      context: ./agent-worker
+      secrets:
+        - ghtoken
+    image: voltini-bugfixer:local
+    restart: unless-stopped
+    env_file: ./agent-worker/.env
+    volumes:
+      # Host-side: clone the repos into ./agent-data/repos and the SQLite
+      # journal lives in ./agent-data/state.sqlite. Matches REPOS_DIR / STATE_DB.
+      - ./agent-data:/data
+
+secrets:
+  ghtoken:
+    file: ./agent-worker/.ghtoken

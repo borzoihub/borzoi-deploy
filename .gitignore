@@ -5,6 +5,9 @@ installer-creds.*.json
 sim-bundle.json
 sim-bundle.*.json
 data/
+agent-data/
+agent-worker/.ghtoken
+agent-worker/node_modules/
 certbot/conf/
 certbot/www/
 nginx/templates/*.conf
