@@ -29,15 +29,23 @@ const VerifySchema = z.object({
 export interface VerifyResult {
   passed: boolean;
   summary: string;
+  /** Notional USD this verify session cost (added to the case envelope). */
+  costUsd: number;
+  /** Verification was cut off by the budget/turn ceiling before reaching a verdict. */
+  limitHit: boolean;
 }
 
-const VERIFY_MAX_TURNS = 12;
+// Test-verify only has to work out how a repo runs its tests and run them — but
+// a complex repo (install, build, slow suite) can legitimately take a while, so
+// keep this generous. The per-case USD budget is the real guard.
+const VERIFY_MAX_TURNS = 60;
 
 export async function implement(
   runner: ClaudeRunner,
   config: Config,
   issue: IssueDetail,
   worktreePath: string,
+  budgetUsd: number,
   scope?: RepoScope,
   priorWork?: string,
 ): Promise<RunResult> {
@@ -47,6 +55,7 @@ export async function implement(
     systemPrompt: implementSystemPrompt(issue, scope, priorWork),
     prompt: implementPrompt(),
     maxTurns: config.maxImplementTurns,
+    maxBudgetUsd: budgetUsd,
     enableAskHuman: true,
   });
 }
@@ -54,21 +63,36 @@ export async function implement(
 export async function verifyTests(
   runner: ClaudeRunner,
   worktreePath: string,
+  budgetUsd: number,
 ): Promise<VerifyResult> {
   const result = await runner.run({
     cwd: worktreePath,
     systemPrompt: verifyTestsSystemPrompt(),
     prompt: verifyTestsPrompt(),
     maxTurns: VERIFY_MAX_TURNS,
+    maxBudgetUsd: budgetUsd,
     outputSchema: z.toJSONSchema(VerifySchema) as Record<string, unknown>,
   });
 
+  if (result.limitHit) {
+    return {
+      passed: false,
+      summary: "Test-verification was cut off by the budget/turn ceiling.",
+      costUsd: result.costUsd,
+      limitHit: true,
+    };
+  }
   if (result.isError) {
-    return { passed: false, summary: "Test-verification session errored." };
+    return { passed: false, summary: "Test-verification session errored.", costUsd: result.costUsd, limitHit: false };
   }
   const parsed = VerifySchema.safeParse(result.structuredOutput);
   if (!parsed.success) {
-    return { passed: false, summary: "Test-verification returned malformed output." };
+    return {
+      passed: false,
+      summary: "Test-verification returned malformed output.",
+      costUsd: result.costUsd,
+      limitHit: false,
+    };
   }
-  return parsed.data;
+  return { ...parsed.data, costUsd: result.costUsd, limitHit: false };
 }

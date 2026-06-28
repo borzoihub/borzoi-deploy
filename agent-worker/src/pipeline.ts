@@ -1,6 +1,6 @@
 import type { Config } from "./config.js";
 import type { GitHub, IssueDetail } from "./github.js";
-import { LABEL_IN_PROGRESS, LABEL_NEEDS_HUMAN } from "./github.js";
+import { LABEL_IN_PROGRESS, LABEL_NEEDS_HUMAN, RETRY_COMMAND } from "./github.js";
 import type { StateStore, CaseRow, RepoTaskRow, RepoPhase } from "./state.js";
 import type { ClaudeRunner, RunResult } from "./claude.js";
 import {
@@ -19,7 +19,7 @@ import {
 } from "./repos.js";
 import { triage } from "./triage.js";
 import { implement, verifyTests } from "./implement.js";
-import { review, reviewFix, isBlocking, formatFindings } from "./review.js";
+import { review, reviewFix, isBlocking, formatFindings, type ReviewResult } from "./review.js";
 import { openPr, findExistingPr } from "./pr.js";
 import { buildAndLink, packageName, dependsOn } from "./linking.js";
 import { resumeWithAnswerPrompt, type RepoScope } from "./prompts.js";
@@ -50,6 +50,13 @@ export interface PipelineDeps {
 
 const REPO_TERMINAL: RepoPhase[] = ["DONE", "NEEDS_HUMAN"];
 
+/**
+ * Don't start an Agent SDK session with less than this much case budget left —
+ * it would just immediately hit `error_max_budget_usd` having done nothing
+ * useful. Treat "too little left to start" the same as "ran out mid-session".
+ */
+const MIN_SESSION_BUDGET_USD = 1.0;
+
 export function slugify(title: string): string {
   return (
     title
@@ -74,6 +81,38 @@ export class Pipeline {
   /** Human-readable, one-line progress narration for an operator watching logs. */
   private narrate(issueNumber: number, message: string): void {
     console.log(`▶ #${issueNumber}: ${message}`);
+  }
+
+  /** USD still available in this case's budget envelope (never negative). */
+  private budgetRemaining(issueNumber: number): number {
+    const spent = this.deps.state.get(issueNumber)?.costUsd ?? 0;
+    return Math.max(0, this.deps.config.maxBudgetPerCaseUsd - spent);
+  }
+
+  /**
+   * Record what a session cost against the case (and the repo that incurred it),
+   * and log a running "$spent / $budget" line so an operator can watch the
+   * envelope fill. Per-session and cumulative cost both land in the journal,
+   * which is the durable per-bug cost record.
+   */
+  private charge(issueNumber: number, repoKey: string | null, costUsd: number, label: string): void {
+    this.deps.state.addCost(issueNumber, repoKey, costUsd);
+    const spent = this.deps.state.get(issueNumber)?.costUsd ?? 0;
+    console.log(
+      `[cost] #${issueNumber} ${label}: +$${costUsd.toFixed(4)} → $${spent.toFixed(2)} / $${this.deps.config.maxBudgetPerCaseUsd.toFixed(2)} this case`,
+    );
+  }
+
+  /** Hard-fail one repo because the case ran out of budget during a phase. */
+  private outOfBudgetRepo(issue: IssueDetail, task: RepoTaskRow, phaseLabel: string): void {
+    const spent = this.deps.state.get(issue.number)?.costUsd ?? 0;
+    const branchNote = task.branch ? ` Any committed work is on branch \`${task.branch}\`.` : "";
+    this.needsHumanRepo(
+      issue,
+      task,
+      `Hit the $${this.deps.config.maxBudgetPerCaseUsd.toFixed(0)} per-case budget during ${phaseLabel} ` +
+        `(spent $${spent.toFixed(2)} on the case).${branchNote}`,
+    );
   }
 
   private setPhase(issueNumber: number, phase: CaseRow["phase"], patch: Partial<CaseRow> = {}): void {
@@ -101,8 +140,61 @@ export class Pipeline {
   private needsHumanCase(issue: IssueDetail, message: string): void {
     this.narrate(issue.number, `Handing off to a human: ${message}`);
     this.deps.github.addLabel(issue.number, LABEL_NEEDS_HUMAN);
-    this.deps.github.comment(issue.number, `🤖 ${message}`);
-    this.setPhase(issue.number, "NEEDS_HUMAN", { error: message });
+    this.deps.github.comment(
+      issue.number,
+      `🤖 ${message}\n\n_A maintainer can re-run this case by commenting \`${RETRY_COMMAND}\`._`,
+    );
+    // Anchor for the /retry trigger: only a command posted AFTER this comment
+    // re-arms the case (so old history can't re-fire it).
+    const anchorId = this.deps.github.lastCommentId(issue.number) ?? null;
+    this.setPhase(issue.number, "NEEDS_HUMAN", { error: message, needsHumanCommentId: anchorId });
+  }
+
+  /**
+   * Re-run a parked needs-human case when an authorized maintainer comments
+   * `/retry` after the hand-off. Customers can't trigger this — the gate is
+   * write access to the support repo. Re-arming gives the case a FRESH budget
+   * envelope (the maintainer is explicitly asking for another attempt) while the
+   * lifetime cost record is preserved, resets any given-up repo sub-tasks, and
+   * routes the case back through the normal recover→work path with the new
+   * (generous) budget. No-op unless a qualifying command is present.
+   */
+  async retryIfRequested(issue: IssueDetail, row: CaseRow): Promise<void> {
+    if (row.phase !== "NEEDS_HUMAN" || !row.needsHumanCommentId) return;
+    const cmd = this.deps.github.maintainerCommandAfter(
+      issue.number,
+      row.needsHumanCommentId,
+      RETRY_COMMAND,
+    );
+    if (!cmd) return;
+
+    this.narrate(
+      issue.number,
+      `Maintainer @${cmd.author} requested \`${RETRY_COMMAND}\` — re-arming with a fresh $${this.deps.config.maxBudgetPerCaseUsd.toFixed(0)} budget.`,
+    );
+    // Fresh attempt budget (lifetime total is kept by addCost's separate column).
+    this.deps.state.update(issue.number, { costUsd: 0, error: null, needsHumanCommentId: null });
+    // Un-stick every sub-task that had given up, so the retry actually re-attempts
+    // it. recoverExistingWork (run because we drop to NEW) then upgrades any with
+    // committed/tested work straight back to TEST instead of redoing it.
+    for (const t of this.deps.state.getRepoTasks(issue.number)) {
+      if (t.phase === "NEEDS_HUMAN") {
+        this.deps.state.updateRepoTask(issue.number, t.repoKey, {
+          phase: "BRANCH",
+          error: null,
+          reviewIncomplete: false,
+          testAttempts: 0,
+          reviewIters: 0,
+        });
+      }
+    }
+    // Drop both labels + phase to NEW so the next processCase enters recovery.
+    this.deps.github.removeLabel(issue.number, LABEL_NEEDS_HUMAN);
+    this.deps.github.removeLabel(issue.number, LABEL_IN_PROGRESS);
+    this.setPhase(issue.number, "NEW");
+    this.deps.github.comment(issue.number, `🤖 Retrying this case now (requested by @${cmd.author}).`);
+
+    await this.processCase(issue, this.deps.state.get(issue.number)!);
   }
 
   /** Park ONE repo sub-task on a human question; the case is BLOCKED overall. */
@@ -129,6 +221,20 @@ export class Pipeline {
   private needsHumanRepo(issue: IssueDetail, task: RepoTaskRow, message: string): void {
     this.narrate(issue.number, `"${task.repoKey}" needs a human: ${message}`);
     this.setRepoPhase(issue.number, task.repoKey, "NEEDS_HUMAN", { error: message });
+  }
+
+  /**
+   * Soft-fail the advisory review read-pass when the case budget is exhausted:
+   * advance the (already implemented + tested) repo to PR anyway, but flag the
+   * review as incomplete so the case-close comment says so. This is the only
+   * phase that ships on budget exhaustion rather than handing off to a human.
+   */
+  private skipReviewOnBudget(issue: IssueDetail, task: RepoTaskRow): void {
+    this.narrate(
+      issue.number,
+      `"${task.repoKey}" hit the case budget before review finished — shipping the tested work and flagging the automated review as incomplete (soft-fail).`,
+    );
+    this.setRepoPhase(issue.number, task.repoKey, "PR", { reviewIncomplete: true });
   }
 
   /** Advance a case as far as possible this invocation. */
@@ -231,7 +337,17 @@ export class Pipeline {
     this.narrate(issue.number, `Investigating "${issue.title}"…`);
     const reposDir = this.deps.config.reposDir;
     const available = discoverRepos(reposDir).map((r) => r.key);
-    const result = await triage(this.deps.runner, reposDir, available, issue);
+    const result = await triage(this.deps.runner, reposDir, available, issue, this.budgetRemaining(issue.number));
+    this.charge(issue.number, null, result.costUsd, "triage");
+
+    if (result.limitHit) {
+      // Couldn't even decide what to do within budget → escalate, don't guess.
+      this.needsHumanCase(
+        issue,
+        `Triage hit the $${this.deps.config.maxBudgetPerCaseUsd.toFixed(0)} per-case budget before reaching a verdict.`,
+      );
+      return false;
+    }
 
     if (!result.fixable) {
       this.narrate(issue.number, `Not actionable — marking won't-fix: ${result.reason}`);
@@ -434,13 +550,19 @@ export class Pipeline {
 
     if (phase === "IMPLEMENT") {
       if (!this.linkProviders(issue, task, worktree)) return;
+      const budget = this.budgetRemaining(issue.number);
+      if (budget < MIN_SESSION_BUDGET_USD) return this.outOfBudgetRepo(issue, task, "implementation");
       this.narrate(issue.number, `Fixing "${task.repoKey}": ${task.scope ?? ""}`);
       // Feed any work a prior (crashed/recovered) attempt left on the branch so a
       // fresh session continues it instead of starting blind. Empty for genuinely
       // fresh work (clean worktree off base).
       const priorWork = priorWorkSummary(repo, branch, base);
-      const result = await implement(this.deps.runner, this.deps.config, issue, worktree, scope, priorWork);
+      const result = await implement(this.deps.runner, this.deps.config, issue, worktree, budget, scope, priorWork);
+      this.charge(issue.number, task.repoKey, result.costUsd, `implement (${task.repoKey})`);
       if (result.blocked) return this.parkRepo(issue, task, "IMPLEMENT", result);
+      // A fix that didn't finish can't ship — hard-fail (the partial work stays
+      // on the branch for a human).
+      if (result.limitHit) return this.outOfBudgetRepo(issue, task, "implementation");
       if (result.isError) return this.needsHumanRepo(issue, task, "The implementation session errored out.");
       this.setRepoPhase(issue.number, task.repoKey, "TEST");
       phase = "TEST";
@@ -450,8 +572,13 @@ export class Pipeline {
       // Re-link in case the implement session ran its own `npm install` and
       // dropped the local override — tests must see the sibling's local change.
       if (!this.linkProviders(issue, task, worktree)) return;
+      const budget = this.budgetRemaining(issue.number);
+      if (budget < MIN_SESSION_BUDGET_USD) return this.outOfBudgetRepo(issue, task, "test verification");
       this.narrate(issue.number, `Running "${task.repoKey}" test suite…`);
-      const verdict = await verifyTests(this.deps.runner, worktree);
+      const verdict = await verifyTests(this.deps.runner, worktree, budget);
+      this.charge(issue.number, task.repoKey, verdict.costUsd, `test-verify (${task.repoKey})`);
+      // Couldn't confirm pass/fail within budget → can't vouch the fix works.
+      if (verdict.limitHit) return this.outOfBudgetRepo(issue, task, "test verification");
       if (!verdict.passed) {
         const attempts = (this.deps.state.getRepoTask(issue.number, task.repoKey)?.testAttempts ?? 0) + 1;
         this.deps.state.updateRepoTask(issue.number, task.repoKey, { testAttempts: attempts });
@@ -462,16 +589,21 @@ export class Pipeline {
         if (attempts >= this.deps.config.maxTestAttempts) {
           return this.needsHumanRepo(issue, task, `Tests still failing after ${attempts} attempts: ${verdict.summary}`);
         }
+        const fixBudget = this.budgetRemaining(issue.number);
+        if (fixBudget < MIN_SESSION_BUDGET_USD) return this.outOfBudgetRepo(issue, task, "implementation");
         this.narrate(issue.number, `Re-working "${task.repoKey}" to make tests pass…`);
         const fix = await implement(
           this.deps.runner,
           this.deps.config,
           issue,
           worktree,
+          fixBudget,
           scope,
           priorWorkSummary(repo, branch, base),
         );
+        this.charge(issue.number, task.repoKey, fix.costUsd, `implement-fix (${task.repoKey})`);
         if (fix.blocked) return this.parkRepo(issue, task, "IMPLEMENT", fix);
+        if (fix.limitHit) return this.outOfBudgetRepo(issue, task, "implementation");
         if (fix.isError) return this.needsHumanRepo(issue, task, "The fix session errored out.");
         return this.driveRepoTask(issue, this.deps.state.getRepoTask(issue.number, task.repoKey)!);
       }
@@ -480,30 +612,49 @@ export class Pipeline {
     }
 
     if (phase === "REVIEW") {
-      this.narrate(issue.number, `Self-reviewing "${task.repoKey}" (5 perspectives)…`);
-      const findings = await review(this.deps.runner, worktree, base);
-      const blocking = findings.filter(isBlocking);
-      if (blocking.length > 0) {
-        const iters = (this.deps.state.getRepoTask(issue.number, task.repoKey)?.reviewIters ?? 0) + 1;
-        this.deps.state.updateRepoTask(issue.number, task.repoKey, { reviewIters: iters });
-        this.narrate(
-          issue.number,
-          `Review of "${task.repoKey}" found ${blocking.length} blocking issue(s) — addressing them (iteration ${iters}).`,
-        );
-        if (iters > this.deps.config.maxReviewIters) {
-          return this.needsHumanRepo(
-            issue,
-            task,
-            `Review did not converge after ${this.deps.config.maxReviewIters} iterations. Outstanding:\n${formatFindings(blocking)}`,
-          );
-        }
-        const fix = await reviewFix(this.deps.runner, this.deps.config, issue, worktree, blocking, scope);
-        if (fix.blocked) return this.parkRepo(issue, task, "REVIEW", fix);
-        if (fix.isError) return this.needsHumanRepo(issue, task, "The review-fix session errored out.");
-        return this.driveRepoTask(issue, this.deps.state.getRepoTask(issue.number, task.repoKey)!);
+      const budget = this.budgetRemaining(issue.number);
+      let reviewResult: ReviewResult | undefined;
+      if (budget >= MIN_SESSION_BUDGET_USD) {
+        this.narrate(issue.number, `Self-reviewing "${task.repoKey}" (5 perspectives)…`);
+        reviewResult = await review(this.deps.runner, worktree, base, budget);
+        this.charge(issue.number, task.repoKey, reviewResult.costUsd, `review (${task.repoKey})`);
       }
-      this.setRepoPhase(issue.number, task.repoKey, "PR");
-      phase = "PR";
+      if (!reviewResult || reviewResult.limitHit) {
+        // The review read-pass is advisory. When the budget runs out before it can
+        // vouch for the (already implemented + tested) diff, SOFT-fail: ship the
+        // work and flag the automated review as incomplete on close.
+        this.skipReviewOnBudget(issue, task);
+        phase = "PR";
+      } else {
+        const blocking = reviewResult.findings.filter(isBlocking);
+        if (blocking.length > 0) {
+          const iters = (this.deps.state.getRepoTask(issue.number, task.repoKey)?.reviewIters ?? 0) + 1;
+          this.deps.state.updateRepoTask(issue.number, task.repoKey, { reviewIters: iters });
+          this.narrate(
+            issue.number,
+            `Review of "${task.repoKey}" found ${blocking.length} blocking issue(s) — addressing them (iteration ${iters}).`,
+          );
+          if (iters > this.deps.config.maxReviewIters) {
+            return this.needsHumanRepo(
+              issue,
+              task,
+              `Review did not converge after ${this.deps.config.maxReviewIters} iterations. Outstanding:\n${formatFindings(blocking)}`,
+            );
+          }
+          const fixBudget = this.budgetRemaining(issue.number);
+          if (fixBudget < MIN_SESSION_BUDGET_USD) return this.outOfBudgetRepo(issue, task, "review fixes");
+          const fix = await reviewFix(this.deps.runner, this.deps.config, issue, worktree, blocking, fixBudget, scope);
+          this.charge(issue.number, task.repoKey, fix.costUsd, `review-fix (${task.repoKey})`);
+          if (fix.blocked) return this.parkRepo(issue, task, "REVIEW", fix);
+          // Unaddressed blocking findings shouldn't ship — hard-fail (unlike the
+          // advisory read-pass above, fixing real findings is load-bearing).
+          if (fix.limitHit) return this.outOfBudgetRepo(issue, task, "review fixes");
+          if (fix.isError) return this.needsHumanRepo(issue, task, "The review-fix session errored out.");
+          return this.driveRepoTask(issue, this.deps.state.getRepoTask(issue.number, task.repoKey)!);
+        }
+        this.setRepoPhase(issue.number, task.repoKey, "PR");
+        phase = "PR";
+      }
     }
 
     if (phase === "PR") {
@@ -553,10 +704,19 @@ export class Pipeline {
     }
     if (tasks.every((t) => t.phase === "DONE")) {
       const prLines = tasks.map((t) => `- \`${t.repoKey}\`: ${t.prUrl}`).join("\n");
-      this.narrate(issue.number, `Done — all ${tasks.length} PR(s) opened, closing as resolved.`);
+      const incomplete = tasks.filter((t) => t.reviewIncomplete).map((t) => t.repoKey);
+      const caveat = incomplete.length
+        ? `\n\n⚠️ Automated review didn't fully complete for ${incomplete.map((k) => `\`${k}\``).join(", ")} ` +
+          `(reached the per-case budget). The fix and its tests passed; a maintainer should give the PR${incomplete.length > 1 ? "s" : ""} an extra look before merge.`
+        : "";
+      const spent = this.deps.state.get(issue.number)?.costUsd ?? 0;
+      this.narrate(
+        issue.number,
+        `Done — all ${tasks.length} PR(s) opened, closing as resolved. Case cost: $${spent.toFixed(2)}${incomplete.length ? ` (review incomplete: ${incomplete.join(", ")})` : ""}.`,
+      );
       this.deps.github.closeResolved(
         issue.number,
-        `🤖 Fixed and reviewed. Pull request(s):\n${prLines}`,
+        `🤖 Fixed${incomplete.length ? "" : " and reviewed"}. Pull request(s):\n${prLines}${caveat}`,
       );
       this.setPhase(issue.number, "DONE");
       this.cleanupWorktrees(issue.number);
@@ -599,6 +759,12 @@ export class Pipeline {
       const base = defaultBranch(repo);
       const worktree = ensureWorktree(repo, task.branch, base);
 
+      const budget = this.budgetRemaining(issue.number);
+      if (budget < MIN_SESSION_BUDGET_USD) {
+        this.outOfBudgetRepo(issue, task, "the resumed session");
+        resumedAny = true;
+        continue;
+      }
       const result = await this.deps.runner.run({
         label: `resume #${issue.number} (${task.repoKey})`,
         cwd: worktree,
@@ -606,9 +772,16 @@ export class Pipeline {
         prompt: resumeWithAnswerPrompt(reply.body),
         enableAskHuman: true,
         maxTurns: this.deps.config.maxImplementTurns,
+        maxBudgetUsd: budget,
       });
+      this.charge(issue.number, task.repoKey, result.costUsd, `resume (${task.repoKey})`);
       if (result.blocked) {
         this.parkRepo(issue, task, task.resumePhase, result);
+        continue;
+      }
+      if (result.limitHit) {
+        this.outOfBudgetRepo(issue, task, "the resumed session");
+        resumedAny = true;
         continue;
       }
       if (result.isError) {

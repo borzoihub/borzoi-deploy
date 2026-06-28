@@ -21,7 +21,25 @@ export interface Repo {
 }
 
 function git(cwd: string, args: string[]): string {
-  return execFileSync("git", args, { cwd, encoding: "utf8" }).trim();
+  try {
+    // Capture stderr instead of inheriting it: several callers intentionally run
+    // git commands that may fail (e.g. `branch -D` on a not-yet-created branch in
+    // freshWorktree, `worktree remove` on a stale path) and swallow the error.
+    // With inherited stderr those handled failures still print scary lines like
+    // "error: branch '…' not found" to the operator console.
+    return execFileSync("git", args, {
+      cwd,
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "pipe"],
+    }).trim();
+  } catch (e) {
+    // Genuine (uncaught) failures must keep their diagnostics — fold git's
+    // captured stderr into the thrown error so it isn't silently lost.
+    const err = e as { stderr?: Buffer | string; message?: string };
+    const detail = err.stderr ? String(err.stderr).trim() : "";
+    if (detail && err.message) err.message = `${err.message}\n${detail}`;
+    throw e;
+  }
 }
 
 function isGitRepo(path: string): boolean {

@@ -46,6 +46,14 @@ export interface RunOptions {
   prompt: string;
   systemPrompt?: string;
   maxTurns?: number;
+  /**
+   * Notional USD budget for THIS session. The SDK stops the agent loop once the
+   * session's cost exceeds it, returning an `error_max_budget_usd` result. The
+   * orchestrator passes the case's remaining envelope here so a runaway session
+   * can't overspend the per-case ceiling. Enforced after a turn completes, so
+   * actual spend can overshoot by up to one turn's cost.
+   */
+  maxBudgetUsd?: number;
   /** Session id to resume (continues a parked conversation). */
   resume?: string;
   /** JSON schema; when set, the session returns validated structured output. */
@@ -64,7 +72,26 @@ export interface RunResult {
   /** ask_human was invoked — the session is parked. */
   blocked: boolean;
   question: string | undefined;
+  /** Notional USD this session cost (from the SDK's `total_cost_usd`); 0 if unknown. */
+  costUsd: number;
+  /**
+   * The session stopped because it hit a budget/turn ceiling
+   * (`error_max_budget_usd` / `error_max_turns`) rather than finishing or
+   * crashing. Callers route this distinctly: hard-fail for implement/test/fix,
+   * soft-fail (proceed) for the advisory review read-pass.
+   */
+  limitHit: boolean;
 }
+
+/**
+ * Result subtypes the SDK emits when a session is cut off by a ceiling rather
+ * than failing. NOTE: on these the SDK yields this result message AND THEN
+ * throws `Error: Claude Code returned an error result: Reached maximum ...`
+ * after the stream — so we both read the subtype here and swallow the matching
+ * throw in the catch below.
+ */
+const LIMIT_SUBTYPES = new Set(["error_max_turns", "error_max_budget_usd"]);
+const LIMIT_THROW_RE = /Reached maximum (number of turns|budget)/i;
 
 export class ClaudeRunner {
   constructor(private readonly config: Config) {}
@@ -89,6 +116,9 @@ export class ClaudeRunner {
     }
     if (opts.maxTurns !== undefined) {
       options.maxTurns = opts.maxTurns;
+    }
+    if (opts.maxBudgetUsd !== undefined) {
+      options.maxBudgetUsd = opts.maxBudgetUsd;
     }
     if (opts.resume !== undefined) {
       options.resume = opts.resume;
@@ -119,7 +149,9 @@ export class ClaudeRunner {
     };
 
     console.log(
-      `[claude] ${label}: starting session (model ${this.config.model}, maxTurns ${opts.maxTurns ?? "default"}${wantsStructured ? ", structured output" : ""})`,
+      `[claude] ${label}: starting session (model ${this.config.model}, maxTurns ${opts.maxTurns ?? "default"}` +
+        `${opts.maxBudgetUsd !== undefined ? `, budget $${opts.maxBudgetUsd.toFixed(2)}` : ""}` +
+        `${wantsStructured ? ", structured output" : ""})`,
     );
 
     let sessionId: string | undefined;
@@ -128,6 +160,7 @@ export class ClaudeRunner {
     let isError = false;
     let resultSubtype: string | undefined;
     let turns: number | undefined;
+    let costUsd = 0;
 
     // Liveness: a long implement/review session is otherwise silent for minutes.
     // Emit a heartbeat with elapsed time, message count and last activity so an
@@ -172,6 +205,11 @@ export class ClaudeRunner {
           resultSubtype = message.subtype;
           isError = message.subtype !== "success";
           turns = "num_turns" in message ? message.num_turns : undefined;
+          // The cost field is present on success AND on error results (incl.
+          // the budget/turn ceilings) — always capture it for case accounting.
+          if ("total_cost_usd" in message && typeof message.total_cost_usd === "number") {
+            costUsd = message.total_cost_usd;
+          }
           if (message.subtype === "success") {
             text = message.result;
             structuredOutput = message.structured_output;
@@ -189,21 +227,37 @@ export class ClaudeRunner {
           isError: false,
           blocked: true,
           question: askHuman.question(),
+          costUsd,
+          limitHit: false,
         };
       }
       // We aborted a wedged session on the stall timeout — report it as an
       // error result (not a thrown crash) so the caller can retry/route it.
       if (stalledOut && e instanceof AbortError) {
         clearInterval(heartbeat);
-        return { text, sessionId, structuredOutput, isError: true, blocked: false, question: undefined };
+        return { text, sessionId, structuredOutput, isError: true, blocked: false, question: undefined, costUsd, limitHit: false };
+      }
+      // Budget/turn ceiling. The SDK already yielded the error result (so we have
+      // the subtype + cost) and is NOW throwing a matching "Reached maximum ..."
+      // error. Swallow that throw and return a clean limit signal — don't let the
+      // raw SDK string bubble to the orchestrator's generic catch-all.
+      const message = e instanceof Error ? e.message : String(e);
+      if ((resultSubtype && LIMIT_SUBTYPES.has(resultSubtype)) || LIMIT_THROW_RE.test(message)) {
+        clearInterval(heartbeat);
+        console.log(
+          `[claude] ${label}: stopped at ${resultSubtype ?? "limit"} after $${costUsd.toFixed(4)} — returning a clean limit signal.`,
+        );
+        return { text, sessionId, structuredOutput, isError: true, blocked: false, question: undefined, costUsd, limitHit: true };
       }
       throw e;
     } finally {
       clearInterval(heartbeat);
     }
 
+    const limitHit = resultSubtype ? LIMIT_SUBTYPES.has(resultSubtype) : false;
     console.log(
       `[claude] ${label}: finished — subtype=${resultSubtype ?? "none"}, turns=${turns ?? "?"}, ` +
+        `cost=$${costUsd.toFixed(4)}, ` +
         `structuredOutput=${structuredOutput === undefined ? "MISSING" : "present"}, textLen=${text.length}`,
     );
     // When we asked for structured output but the model returned none, the raw
@@ -221,6 +275,8 @@ export class ClaudeRunner {
       isError,
       blocked: askHuman?.wasAsked() ?? false,
       question: askHuman?.question(),
+      costUsd,
+      limitHit,
     };
   }
 }

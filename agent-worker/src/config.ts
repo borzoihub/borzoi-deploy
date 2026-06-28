@@ -32,6 +32,16 @@ export interface Config {
   maxReviewIters: number;
   maxTestAttempts: number;
   maxImplementTurns: number;
+  /**
+   * Hard ceiling on the notional API cost (USD) of resolving ONE support case,
+   * summed across every Agent SDK session it runs (triage + per-repo
+   * implement/test/review/fix loops). It is the primary runaway guard — the
+   * per-session turn caps are only a secondary backstop. The cost is "notional"
+   * because the SDK authenticates against a Claude subscription (no per-token
+   * billing), but it's a faithful proxy for tokens spent, which is the real
+   * scarce resource against the plan's rolling/weekly usage caps.
+   */
+  maxBudgetPerCaseUsd: number;
   stateDb: string;
 }
 
@@ -48,6 +58,15 @@ function requiredInt(name: string): number {
   const n = Number(raw);
   if (!Number.isInteger(n) || n <= 0) {
     throw new Error(`Env var ${name} must be a positive integer, got: ${raw}`);
+  }
+  return n;
+}
+
+function requiredFloat(name: string): number {
+  const raw = required(name);
+  const n = Number(raw);
+  if (!Number.isFinite(n) || n <= 0) {
+    throw new Error(`Env var ${name} must be a positive number, got: ${raw}`);
   }
   return n;
 }
@@ -69,6 +88,7 @@ export function loadConfig(): Config {
     maxReviewIters: requiredInt("MAX_REVIEW_ITERS"),
     maxTestAttempts: requiredInt("MAX_TEST_ATTEMPTS"),
     maxImplementTurns: requiredInt("MAX_IMPLEMENT_TURNS"),
+    maxBudgetPerCaseUsd: requiredFloat("MAX_BUDGET_PER_CASE_USD"),
     stateDb: required("STATE_DB"),
   };
 

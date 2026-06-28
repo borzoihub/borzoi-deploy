@@ -131,9 +131,50 @@ saved Agent SDK session with the answer.
 All config is env-only (no committed secrets). See `.env.example` for the full
 list: `CLAUDE_CODE_OAUTH_TOKEN` / `MODEL`, `GH_TOKEN` / `BOT_GH_LOGIN` /
 `SUPPORT_REPO`, `REPOS_DIR`, and the behaviour knobs (`POLL_INTERVAL_SEC`,
-`MAX_REVIEW_ITERS`, `MAX_TEST_ATTEMPTS`, `MAX_IMPLEMENT_TURNS`, `STATE_DB`).
+`MAX_REVIEW_ITERS`, `MAX_TEST_ATTEMPTS`, `MAX_IMPLEMENT_TURNS`,
+`MAX_BUDGET_PER_CASE_USD`, `STATE_DB`).
 The worker refuses to start if `CLAUDE_CODE_OAUTH_TOKEN` or `MODEL`
 is missing.
+
+### Per-case cost budget
+
+`MAX_BUDGET_PER_CASE_USD` is the **primary** runaway guard: a hard ceiling on the
+notional API cost of resolving one case, summed across every Agent SDK session it
+runs. The per-session turn caps (`MAX_IMPLEMENT_TURNS`, and the read-pass turn
+constants in `triage.ts` / `implement.ts` / `review.ts`) are now only a secondary
+backstop, kept generous so the budget binds first. Each session is given the
+case's *remaining* envelope as its `maxBudgetUsd`, so spend can't exceed the
+ceiling. Cost is "notional" (billing is via a Claude subscription, not per-token),
+but it's a faithful proxy for tokens spent — the real scarce resource against the
+plan's rolling/weekly caps.
+
+Cost is persisted in the journal and logged as a running `$spent / $budget`
+line. Two case-level columns: `cost_usd` is the **current attempt** (what the
+envelope is measured against; reset to 0 on a `/retry`), and `lifetime_cost_usd`
+is the **durable per-bug total** across all attempts (use this one to report what
+a bug cost). Per-repo `cost_usd` gives the breakdown by repo. When the envelope
+is exhausted, phases **hard-fail** to needs-human (triage, implement,
+test-verify, review-fix — their output is a precondition to shipping), **except**
+the advisory review read-pass, which **soft-fails**: the
+already-implemented-and-tested work still ships and the case closes resolved with
+a caveat that the automated review didn't finish (`review_incomplete`). The SDK
+emits a result *and then throws* on `error_max_budget_usd` / `error_max_turns`;
+`claude.ts` normalises both into a clean `limitHit` signal (see the
+`agent-sdk-budget-throws` note).
+
+### Re-running a needs-human case (`/retry`)
+
+A parked needs-human case is re-armed when an **authorized maintainer** comments
+`/retry` (the constant `RETRY_COMMAND`) after the bot's hand-off comment.
+Authorization = **write/maintain/admin on the support repo**, checked live via
+`gh api repos/<repo>/collaborators/<login>/permission` (`role_name`). This is the
+gate because customers are never repo collaborators, so they can't trigger a
+re-run; org membership is deliberately NOT used (a private member reads as 404
+and the membership endpoint is often 403 to a PAT, which would wrongly deny real
+maintainers). `pipeline.retryIfRequested` (polled each tick for NEEDS_HUMAN
+cases) gives the case a **fresh budget envelope** (resets `cost_usd`, keeps
+`lifetime_cost_usd`), un-sticks given-up repo sub-tasks, drops both labels to land
+on `NEW`, and lets the normal recover→work path continue with the new budget.
 
 Repos are **not** configured — a human pre-clones the workable repos into
 `REPOS_DIR` (symlinks are followed); any git repo found there is fair game. If a

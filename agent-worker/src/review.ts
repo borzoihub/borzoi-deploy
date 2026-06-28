@@ -37,7 +37,22 @@ const ReviewSchema = z.object({
 
 export type Finding = z.infer<typeof FindingSchema>;
 
-const REVIEW_MAX_TURNS = 20;
+export interface ReviewResult {
+  findings: Finding[];
+  /** Notional USD this review session cost (added to the case envelope). */
+  costUsd: number;
+  /**
+   * The review read-pass was cut off by the budget/turn ceiling before it could
+   * emit findings. The read-pass is advisory, so callers SOFT-fail this (ship the
+   * already-tested work, annotate the close) rather than handing off to a human.
+   */
+  limitHit: boolean;
+}
+
+// Only a secondary backstop now — the per-case USD budget is the primary guard.
+// Generous so a large diff (e.g. the mobile app) can be read across all five
+// perspectives without the turn cap cutting the read-pass short.
+const REVIEW_MAX_TURNS = 60;
 
 export function isBlocking(finding: Finding): boolean {
   return finding.severity === "Critical" || finding.severity === "Important";
@@ -48,15 +63,20 @@ export async function review(
   runner: ClaudeRunner,
   worktreePath: string,
   base: string,
-): Promise<Finding[]> {
+  budgetUsd: number,
+): Promise<ReviewResult> {
   const result = await runner.run({
     cwd: worktreePath,
     systemPrompt: reviewSystemPrompt(),
     prompt: reviewPrompt(base),
     maxTurns: REVIEW_MAX_TURNS,
+    maxBudgetUsd: budgetUsd,
     outputSchema: z.toJSONSchema(ReviewSchema) as Record<string, unknown>,
   });
 
+  if (result.limitHit) {
+    return { findings: [], costUsd: result.costUsd, limitHit: true };
+  }
   if (result.isError) {
     throw new Error("Review session failed");
   }
@@ -64,7 +84,7 @@ export async function review(
   if (!parsed.success) {
     throw new Error(`Review returned malformed output: ${parsed.error.message}`);
   }
-  return parsed.data.findings;
+  return { findings: parsed.data.findings, costUsd: result.costUsd, limitHit: false };
 }
 
 /** Format blocking findings as a checklist for the fix session. */
@@ -84,6 +104,7 @@ export async function reviewFix(
   issue: IssueDetail,
   worktreePath: string,
   findings: Finding[],
+  budgetUsd: number,
   scope?: RepoScope,
 ): Promise<RunResult> {
   return runner.run({
@@ -92,6 +113,7 @@ export async function reviewFix(
     systemPrompt: reviewFixSystemPrompt(issue, scope),
     prompt: reviewFixPrompt(formatFindings(findings)),
     maxTurns: config.maxImplementTurns,
+    maxBudgetUsd: budgetUsd,
     enableAskHuman: true,
   });
 }

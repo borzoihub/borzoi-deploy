@@ -241,6 +241,20 @@ async function tick(deps: {
     }
   }
 
+  // 1.5 Re-run any needs-human case where an authorized maintainer commented
+  // /retry. retryIfRequested drives the re-armed case itself, so these don't
+  // need to also appear in the actionable pass below.
+  const needsHuman = state
+    .allInPhase("NEEDS_HUMAN")
+    .filter((r) => openNumbers.has(r.issueNumber));
+  for (const row of needsHuman) {
+    try {
+      await pipeline.retryIfRequested(github.view(row.issueNumber), row);
+    } catch (e) {
+      console.error(`[${ts()}]   retry check failed for #${row.issueNumber}:`, e);
+    }
+  }
+
   // 2. Drive actionable cases forward, sequentially.
   for (const row of actionable) {
     console.log(`[${ts()}]   ▶ #${row.issueNumber} (${row.phase}): processing…`);

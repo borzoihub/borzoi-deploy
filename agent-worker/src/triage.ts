@@ -35,11 +35,17 @@ export interface TriageResult {
    */
   missingRepos: RepoTarget[];
   reason: string;
+  /** Notional USD this triage session cost (added to the case envelope). */
+  costUsd: number;
+  /** Triage was cut off by the budget/turn ceiling — the verdict is unreliable. */
+  limitHit: boolean;
 }
 
 // Triage may read across several repos to spot cross-repo (`*-common`) work, so
-// it needs more turns than a single-file glance.
-const TRIAGE_MAX_TURNS = 25;
+// it needs more turns than a single-file glance. This is only a secondary
+// backstop now — the per-case USD budget is the primary guard — so keep it
+// generous enough that the budget binds first.
+const TRIAGE_MAX_TURNS = 40;
 
 /**
  * Decide whether a support case should be fixed in code and, if so, in which
@@ -52,6 +58,7 @@ export async function triage(
   reposDir: string,
   availableRepoKeys: string[],
   issue: IssueDetail,
+  budgetUsd: number,
 ): Promise<TriageResult> {
   console.log(
     `[triage] #${issue.number}: available repos = [${availableRepoKeys.join(", ") || "none"}]`,
@@ -62,8 +69,23 @@ export async function triage(
     systemPrompt: triageSystemPrompt(availableRepoKeys),
     prompt: triagePrompt(issue),
     maxTurns: TRIAGE_MAX_TURNS,
+    maxBudgetUsd: budgetUsd,
     outputSchema: z.toJSONSchema(TriageSchema) as Record<string, unknown>,
   });
+
+  // Budget/turn ceiling: the verdict can't be trusted (often no structured
+  // output at all). Surface it so the case hard-fails to needs-human, not a
+  // bogus won't-fix close.
+  if (result.limitHit) {
+    return {
+      fixable: false,
+      repos: [],
+      missingRepos: [],
+      reason: "Triage was cut off by the budget/turn ceiling before reaching a verdict.",
+      costUsd: result.costUsd,
+      limitHit: true,
+    };
+  }
 
   if (result.isError) {
     throw new Error(`Triage session failed for issue #${issue.number}`);
@@ -97,5 +119,7 @@ export async function triage(
     repos,
     missingRepos,
     reason: parsed.data.reason,
+    costUsd: result.costUsd,
+    limitHit: false,
   };
 }

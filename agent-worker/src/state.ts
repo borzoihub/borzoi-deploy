@@ -46,6 +46,23 @@ export interface CaseRow {
   slug: string | null;
   title: string | null;
   error: string | null;
+  /**
+   * Notional USD spent on the CURRENT attempt — what the budget envelope is
+   * measured against. Reset to 0 when a maintainer `/retry`s, so a re-run gets a
+   * fresh envelope. For the lifetime total, see `lifetimeCostUsd`.
+   */
+  costUsd: number;
+  /**
+   * Cumulative notional USD across ALL attempts (never reset) — the durable
+   * per-bug cost record. Use this, not `costUsd`, to report what a bug cost.
+   */
+  lifetimeCostUsd: number;
+  /**
+   * Id of the bot's needs-human comment — the anchor a `/retry` must come AFTER.
+   * Null for cases parked before this was tracked (they can't be `/retry`d; use
+   * the manual label path).
+   */
+  needsHumanCommentId: string | null;
   updatedAt: string;
 }
 
@@ -66,6 +83,14 @@ export interface RepoTaskRow {
   reviewIters: number;
   prUrl: string | null;
   error: string | null;
+  /** Notional USD spent on this repo sub-task (for per-repo cost breakdown). */
+  costUsd: number;
+  /**
+   * The review read-pass was cut off by the budget/turn ceiling before it could
+   * vouch for the diff. The work still ships (a soft-fail), but the case-close
+   * comment is annotated so a human knows the automated review was incomplete.
+   */
+  reviewIncomplete: boolean;
   updatedAt: string;
 }
 
@@ -75,6 +100,9 @@ interface RawCase {
   slug: string | null;
   title: string | null;
   error: string | null;
+  cost_usd: number;
+  lifetime_cost_usd: number;
+  needs_human_comment_id: string | null;
   updated_at: string;
 }
 
@@ -91,6 +119,8 @@ interface RawRepoTask {
   review_iters: number;
   pr_url: string | null;
   error: string | null;
+  cost_usd: number;
+  review_incomplete: number;
   updated_at: string;
 }
 
@@ -101,6 +131,9 @@ function toCaseRow(raw: RawCase): CaseRow {
     slug: raw.slug,
     title: raw.title,
     error: raw.error,
+    costUsd: raw.cost_usd ?? 0,
+    lifetimeCostUsd: raw.lifetime_cost_usd ?? 0,
+    needsHumanCommentId: raw.needs_human_comment_id,
     updatedAt: raw.updated_at,
   };
 }
@@ -119,6 +152,8 @@ function toRepoTaskRow(raw: RawRepoTask): RepoTaskRow {
     reviewIters: raw.review_iters,
     prUrl: raw.pr_url,
     error: raw.error,
+    costUsd: raw.cost_usd ?? 0,
+    reviewIncomplete: (raw.review_incomplete ?? 0) === 1,
     updatedAt: raw.updated_at,
   };
 }
@@ -133,10 +168,13 @@ export class StateStore {
       CREATE TABLE IF NOT EXISTS cases (
         issue_number INTEGER PRIMARY KEY,
         phase        TEXT NOT NULL,
-        slug         TEXT,
-        title        TEXT,
-        error        TEXT,
-        updated_at   TEXT NOT NULL
+        slug              TEXT,
+        title             TEXT,
+        error             TEXT,
+        cost_usd          REAL NOT NULL DEFAULT 0,
+        lifetime_cost_usd REAL NOT NULL DEFAULT 0,
+        needs_human_comment_id TEXT,
+        updated_at        TEXT NOT NULL
       );
       CREATE TABLE IF NOT EXISTS case_repos (
         issue_number       INTEGER NOT NULL,
@@ -151,10 +189,36 @@ export class StateStore {
         review_iters       INTEGER NOT NULL DEFAULT 0,
         pr_url             TEXT,
         error              TEXT,
+        cost_usd           REAL NOT NULL DEFAULT 0,
+        review_incomplete  INTEGER NOT NULL DEFAULT 0,
         updated_at         TEXT NOT NULL,
         PRIMARY KEY (issue_number, repo_key)
       );
     `);
+    this.migrate();
+  }
+
+  /**
+   * Add columns introduced after a DB was first created. `ADD COLUMN` is a
+   * no-op-if-present pattern here: SQLite has no "IF NOT EXISTS" for columns, so
+   * we just attempt each and ignore the "duplicate column name" error. New DBs
+   * already have them from CREATE TABLE above; this only patches older ones.
+   */
+  private migrate(): void {
+    const additions: Array<[string, string]> = [
+      ["cases", "cost_usd REAL NOT NULL DEFAULT 0"],
+      ["cases", "lifetime_cost_usd REAL NOT NULL DEFAULT 0"],
+      ["cases", "needs_human_comment_id TEXT"],
+      ["case_repos", "cost_usd REAL NOT NULL DEFAULT 0"],
+      ["case_repos", "review_incomplete INTEGER NOT NULL DEFAULT 0"],
+    ];
+    for (const [table, column] of additions) {
+      try {
+        this.db.exec(`ALTER TABLE ${table} ADD COLUMN ${column}`);
+      } catch (e) {
+        if (!/duplicate column name/i.test(String(e))) throw e;
+      }
+    }
   }
 
   private now(): string {
@@ -204,8 +268,35 @@ export class StateStore {
       slug: "slug",
       title: "title",
       error: "error",
+      costUsd: "cost_usd",
+      lifetimeCostUsd: "lifetime_cost_usd",
+      needsHumanCommentId: "needs_human_comment_id",
     };
     this.patch("cases", columns, patch, ["issue_number = ?"], [issueNumber]);
+  }
+
+  /**
+   * Atomically add to the cumulative cost of a case (and, when given, the repo
+   * sub-task that incurred it). Used after every Agent SDK session so the case
+   * budget envelope and the per-bug cost record stay current.
+   */
+  addCost(issueNumber: number, repoKey: string | null, deltaUsd: number): void {
+    if (!(deltaUsd > 0)) return;
+    const now = this.now();
+    // cost_usd is the current-attempt counter (reset on /retry); lifetime is the
+    // durable total that survives retries.
+    this.db
+      .prepare(
+        "UPDATE cases SET cost_usd = cost_usd + ?, lifetime_cost_usd = lifetime_cost_usd + ?, updated_at = ? WHERE issue_number = ?",
+      )
+      .run(deltaUsd, deltaUsd, now, issueNumber);
+    if (repoKey) {
+      this.db
+        .prepare(
+          "UPDATE case_repos SET cost_usd = cost_usd + ?, updated_at = ? WHERE issue_number = ? AND repo_key = ?",
+        )
+        .run(deltaUsd, now, issueNumber, repoKey);
+    }
   }
 
   // --- Per-repo sub-tasks ---------------------------------------------------
@@ -261,6 +352,8 @@ export class StateStore {
       reviewIters: "review_iters",
       prUrl: "pr_url",
       error: "error",
+      costUsd: "cost_usd",
+      reviewIncomplete: "review_incomplete",
     };
     this.patch(
       "case_repos",
@@ -286,7 +379,8 @@ export class StateStore {
       const value = patchObj[key];
       if (value !== undefined) {
         sets.push(`${column} = ?`);
-        values.push(value);
+        // better-sqlite3 can't bind booleans — store them as 0/1.
+        values.push(typeof value === "boolean" ? (value ? 1 : 0) : value);
       }
     }
     sets.push("updated_at = ?");
