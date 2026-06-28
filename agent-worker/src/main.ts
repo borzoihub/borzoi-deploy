@@ -1,7 +1,8 @@
 import { execFileSync } from "node:child_process";
+import { existsSync, statSync } from "node:fs";
 import { DateHelper } from "@digistrada/theworks-common";
 import { loadConfig, type Config } from "./config.js";
-import { GitHub, LABEL_IN_PROGRESS, LABEL_NEEDS_HUMAN } from "./github.js";
+import { GitHub, LABEL_IN_PROGRESS, LABEL_NEEDS_HUMAN, LABEL_WONTFIX } from "./github.js";
 import { StateStore, type Phase, type RepoTaskRow } from "./state.js";
 import { ClaudeRunner } from "./claude.js";
 import { Pipeline } from "./pipeline.js";
@@ -24,6 +25,29 @@ const ACTIONABLE_PHASES: Phase[] = ["NEW", "WORKING"];
  */
 function applyClaudeBackendEnv(config: Config): void {
   process.env["CLAUDE_CODE_OAUTH_TOKEN"] = config.oauthToken;
+}
+
+/**
+ * REPOS_DIR is the one piece of config we can only validate against the
+ * filesystem, and a missing/wrong path blocks the WHOLE worker — not one case.
+ * If we let it slide, discoverRepos() throws deep inside per-case processing,
+ * the generic catch in tick() swallows it as "will retry next tick", and the
+ * worker spins forever with no operator-facing signal (and we must NOT comment
+ * the infra error onto every customer issue). So fail fast and loud at startup
+ * instead, with a message that says exactly what to fix.
+ */
+function validateReposDir(config: Config): void {
+  const dir = config.reposDir;
+  if (!existsSync(dir) || !statSync(dir).isDirectory()) {
+    console.error(
+      `Fatal: REPOS_DIR does not exist (or is not a directory): ${dir}\n` +
+        `  Create it and pre-clone the workable repos into it, e.g.:\n` +
+        `    mkdir -p "${dir}" && git clone <repo> "${dir}/<name>"\n` +
+        `  In Docker this must be a path INSIDE the container (a mounted volume),\n` +
+        `  not a host path — check REPOS_DIR in .env against the compose volume mount.`,
+    );
+    process.exit(1);
+  }
 }
 
 function setupGitAuth(config: Config): void {
@@ -96,7 +120,7 @@ function describeTicket(state: StateStore, issueNumber: number): string {
 
 /**
  * Map GitHub's true state to the journal's case phase. GitHub (open/closed +
- * close reason + labels) is the real source of truth; the journal is a resume
+ * labels) is the real source of truth; the journal is a resume
  * cache that can drift — e.g. a human relabels/reopens an issue directly, or a
  * crash leaves the cache mid-phase. Reconciliation rewrites the cached phase to
  * whatever GitHub now says.
@@ -108,13 +132,15 @@ function describeTicket(state: StateStore, issueNumber: number): string {
  *  - NEEDS_HUMAN is an open issue wearing the needs-human label.
  */
 function phaseFromGitHub(
-  gh: { state: "open" | "closed"; stateReason: string | null; labels: string[] },
+  gh: { state: "open" | "closed"; labels: string[] },
   current: Phase,
 ): Phase {
-  if (gh.state === "closed") {
-    return gh.stateReason === "completed" ? "DONE" : "WONTFIX";
-  }
   const set = new Set(gh.labels.map((l) => l.toLowerCase()));
+  if (gh.state === "closed") {
+    // A won't-fix close always carries the wontfix label (closeWontFix);
+    // anything else closed is a resolved (or human "completed") close.
+    return set.has(LABEL_WONTFIX) || set.has("duplicate") ? "WONTFIX" : "DONE";
+  }
   if (set.has(LABEL_NEEDS_HUMAN)) return "NEEDS_HUMAN";
   if (set.has(LABEL_IN_PROGRESS)) {
     // in-progress can't distinguish active work from a parked Q&A — keep BLOCKED
@@ -149,7 +175,7 @@ function reconcileJournal(github: GitHub, state: StateStore): void {
     const truth = phaseFromGitHub(gh, c.phase);
     if (truth !== c.phase) {
       console.log(
-        `[${ts()}] reconcile: #${c.issueNumber} ${c.phase} → ${truth} (GitHub: ${gh.state}${gh.stateReason ? `/${gh.stateReason}` : ""}).`,
+        `[${ts()}] reconcile: #${c.issueNumber} ${c.phase} → ${truth} (GitHub: ${gh.state}${gh.labels.length ? ` [${gh.labels.join(", ")}]` : ""}).`,
       );
       state.update(c.issueNumber, { phase: truth });
       corrected++;
@@ -235,6 +261,7 @@ async function tick(deps: {
 
 async function main(): Promise<void> {
   const config = loadConfig();
+  validateReposDir(config);
   DateHelper.setLocale("sv-SE");
   applyClaudeBackendEnv(config);
 

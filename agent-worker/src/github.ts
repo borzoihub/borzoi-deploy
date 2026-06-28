@@ -151,14 +151,19 @@ export class GitHub {
   }
 
   /**
-   * The minimal fields needed to derive a case's true status — open/closed,
-   * the close reason (to tell resolved from rejected), and labels. Returns
-   * null if the issue no longer exists or isn't accessible. Cheaper than
-   * `view()` (no body/comments); used for startup reconciliation.
+   * The minimal fields needed to derive a case's true status — open/closed and
+   * labels. Returns null if the issue no longer exists or isn't accessible.
+   * Cheaper than `view()` (no body/comments); used for startup reconciliation.
+   *
+   * We deliberately do NOT request the `stateReason` field: it was only added
+   * to `gh` in v2.21, so an older box errors with `Unknown JSON field:
+   * "stateReason"`. Resolved-vs-won't-fix is instead derived from the `wontfix`
+   * label (which the bot always sets on a won't-fix close), making this
+   * gh-version-independent. See `phaseFromGitHub` in main.ts.
    */
   issueState(
     number: number,
-  ): { state: "open" | "closed"; stateReason: string | null; labels: string[] } | null {
+  ): { state: "open" | "closed"; labels: string[] } | null {
     let out: string;
     try {
       out = this.gh([
@@ -167,19 +172,17 @@ export class GitHub {
         String(number),
         ...this.repoArgs(),
         "--json",
-        "state,stateReason,labels",
+        "state,labels",
       ]);
     } catch {
       return null; // deleted / transferred / no access
     }
     const r = JSON.parse(out) as {
       state: string;
-      stateReason: string | null;
       labels: Array<{ name: string }>;
     };
     return {
       state: r.state.toLowerCase() === "closed" ? "closed" : "open",
-      stateReason: r.stateReason ?? null,
       labels: r.labels.map((l) => l.name),
     };
   }
