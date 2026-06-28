@@ -29,8 +29,11 @@ export interface TriageResult {
   fixable: boolean;
   /** Every repo the fix must touch, validated against what's available. */
   repos: RepoTarget[];
-  /** repoKeys triage named that are NOT cloned in REPOS_DIR. */
-  missingRepoKeys: string[];
+  /**
+   * Repos triage named that are NOT yet cloned in REPOS_DIR, with the scope it
+   * intended for each — so when the repo later appears, the fix has context.
+   */
+  missingRepos: RepoTarget[];
   reason: string;
 }
 
@@ -78,21 +81,21 @@ export async function triage(
   const available = new Set(availableRepoKeys);
   const seen = new Set<string>();
   const repos: RepoTarget[] = [];
-  const missingRepoKeys: string[] = [];
+  const missingRepos: RepoTarget[] = [];
   for (const t of parsed.data.repos) {
     if (seen.has(t.repoKey)) continue;
     seen.add(t.repoKey);
     if (available.has(t.repoKey)) {
       repos.push({ repoKey: t.repoKey, scope: t.scope });
     } else {
-      missingRepoKeys.push(t.repoKey);
+      missingRepos.push({ repoKey: t.repoKey, scope: t.scope });
     }
   }
 
   return {
     fixable: parsed.data.fixable,
     repos,
-    missingRepoKeys,
+    missingRepos,
     reason: parsed.data.reason,
   };
 }

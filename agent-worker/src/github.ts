@@ -4,10 +4,9 @@ import type { Config } from "./config.js";
 /**
  * Thin wrapper over the `gh` CLI for the support tracker.
  *
- * Mutations (label add/remove, close, comment, pr create) are gated by
- * config.dryRun — in dry-run we log the gh command instead of running it.
- * These are customer-facing actions (they push notifications to the homeowner),
- * so dry-run is the safe way to exercise the pipeline end-to-end.
+ * Mutations (label add/remove, close, comment, pr create) are customer-facing
+ * actions — they push notifications to the homeowner — so the customer-facing
+ * gates that authorise them live in the pipeline, not here.
  */
 
 export const LABEL_IN_PROGRESS = "in-progress";
@@ -81,12 +80,8 @@ export class GitHub {
     }).trim();
   }
 
-  /** Run a mutating gh command, honouring dry-run. */
+  /** Run a mutating gh command. */
   private ghMutate(args: string[], cwd?: string): void {
-    if (this.config.dryRun) {
-      console.log(`[dry-run] gh ${args.join(" ")}`);
-      return;
-    }
     this.gh(args, cwd);
   }
 
@@ -155,6 +150,40 @@ export class GitHub {
     };
   }
 
+  /**
+   * The minimal fields needed to derive a case's true status — open/closed,
+   * the close reason (to tell resolved from rejected), and labels. Returns
+   * null if the issue no longer exists or isn't accessible. Cheaper than
+   * `view()` (no body/comments); used for startup reconciliation.
+   */
+  issueState(
+    number: number,
+  ): { state: "open" | "closed"; stateReason: string | null; labels: string[] } | null {
+    let out: string;
+    try {
+      out = this.gh([
+        "issue",
+        "view",
+        String(number),
+        ...this.repoArgs(),
+        "--json",
+        "state,stateReason,labels",
+      ]);
+    } catch {
+      return null; // deleted / transferred / no access
+    }
+    const r = JSON.parse(out) as {
+      state: string;
+      stateReason: string | null;
+      labels: Array<{ name: string }>;
+    };
+    return {
+      state: r.state.toLowerCase() === "closed" ? "closed" : "open",
+      stateReason: r.stateReason ?? null,
+      labels: r.labels.map((l) => l.name),
+    };
+  }
+
   comment(number: number, body: string): void {
     this.ghMutate([
       "issue",
@@ -164,6 +193,23 @@ export class GitHub {
       "--body",
       body,
     ]);
+  }
+
+  /**
+   * Post a comment at most once per `marker`. The marker is embedded as an
+   * invisible HTML comment, so a repeated call (e.g. every poll tick while a
+   * case waits for a missing repo) finds the prior comment and skips — no spam,
+   * and the guarantee survives restarts and journal wipes since it's read back
+   * from GitHub itself, not from local state. Returns true only if it posted.
+   */
+  commentOnce(number: number, marker: string, body: string): boolean {
+    const tag = `<!-- bot:${marker} -->`;
+    const already = this.view(number).comments.some(
+      (c) => c.author === this.config.botLogin && c.body.includes(tag),
+    );
+    if (already) return false;
+    this.comment(number, `${body}\n\n${tag}`);
+    return true;
   }
 
   addLabel(number: number, label: string): void {
@@ -236,7 +282,6 @@ export class GitHub {
 
   /** Ensure the needs-human label exists in the repo (idempotent). */
   ensureLabels(): void {
-    if (this.config.dryRun) return;
     try {
       this.gh([
         "label",

@@ -82,8 +82,8 @@ place; GitHub labels remain the customer-facing source of truth.
 
 ```
 NEW ── triage ──► not fixable ─────────────────► WONTFIX (close, Avvisad)
-        │              repo not cloned ─────────► NEEDS_HUMAN
-        ▼ fixable + repo present
+        │              repo not cloned ─────────► WAIT (retry every tick until cloned)
+        ▼ fixable
 BRANCH  (add in-progress; git worktree off default branch: features/<id>-<slug>)
         ▼
 IMPLEMENT  (autonomous fix + tests + commit; may park on ask_human → BLOCKED)
@@ -110,9 +110,9 @@ saved Agent SDK session with the answer.
 
 | File | Responsibility |
 | --- | --- |
-| `main.ts` | Startup (config, gh auth, labels) + the poll loop. |
+| `main.ts` | Startup (config, gh auth, labels, journal↔GitHub reconcile) + the poll loop. |
 | `config.ts` | Strict env loading; throws on any missing required value. |
-| `github.ts` | `gh` CLI wrapper, status derivation, comment polling. Mutations honour `DRY_RUN`. |
+| `github.ts` | `gh` CLI wrapper, status derivation, comment polling. |
 | `repos.ts` | Discover pre-cloned repos in `REPOS_DIR`; git worktree create/remove. |
 | `state.ts` | SQLite resume journal (one row per issue). |
 | `claude.ts` | Agent SDK `query()` wrapper (cwd, model, bypass, resume, structured output). |
@@ -131,13 +131,14 @@ saved Agent SDK session with the answer.
 All config is env-only (no committed secrets). See `.env.example` for the full
 list: `CLAUDE_CODE_OAUTH_TOKEN` / `MODEL`, `GH_TOKEN` / `BOT_GH_LOGIN` /
 `SUPPORT_REPO`, `REPOS_DIR`, and the behaviour knobs (`POLL_INTERVAL_SEC`,
-`MAX_REVIEW_ITERS`, `MAX_TEST_ATTEMPTS`, `MAX_IMPLEMENT_TURNS`, `STATE_DB`,
-`DRY_RUN`). The worker refuses to start if `CLAUDE_CODE_OAUTH_TOKEN` or `MODEL`
+`MAX_REVIEW_ITERS`, `MAX_TEST_ATTEMPTS`, `MAX_IMPLEMENT_TURNS`, `STATE_DB`).
+The worker refuses to start if `CLAUDE_CODE_OAUTH_TOKEN` or `MODEL`
 is missing.
 
 Repos are **not** configured — a human pre-clones the workable repos into
-`REPOS_DIR`; any git repo found there is fair game. If a case needs a repo
-that isn't present, the bot parks it as `needs-human`.
+`REPOS_DIR` (symlinks are followed); any git repo found there is fair game. If a
+case needs a repo that isn't present, the bot keeps the case active and **retries
+every tick until the repo is cloned** — it self-heals rather than parking.
 
 ---
 

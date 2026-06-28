@@ -24,7 +24,7 @@ export interface ExistingPr {
 /**
  * Look for a pull request already opened from `branch` on the repo's GitHub
  * remote — the signal that this issue's work was (at least partly) done before,
- * even if our local journal was wiped. Read-only; never gated by dry-run.
+ * even if our local journal was wiped. Read-only.
  */
 export function findExistingPr(config: Config, repo: Repo, branch: string): ExistingPr | undefined {
   const slug = repoSlug(repo);
@@ -91,12 +91,6 @@ export function openPr(
     "from the architect/performance/energy-domain/tester/security perspectives",
     "with the test suite passing.",
   ].join("\n");
-
-  if (config.dryRun) {
-    console.log(`[dry-run] git push -u origin ${branch} (in ${worktreePath})`);
-    console.log(`[dry-run] gh pr create --base ${base} --head ${branch} --title "${title}"`);
-    return { url: "(dry-run: no PR created)" };
-  }
 
   run("git", ["push", "-u", "origin", branch], worktreePath, config);
   const url = run(

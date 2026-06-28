@@ -33,7 +33,6 @@ export interface Config {
   maxTestAttempts: number;
   maxImplementTurns: number;
   stateDb: string;
-  dryRun: boolean;
 }
 
 function required(name: string): string {
@@ -44,11 +43,6 @@ function required(name: string): string {
   return v.trim();
 }
 
-function optional(name: string): string | undefined {
-  const v = process.env[name];
-  return v === undefined || v.trim() === "" ? undefined : v.trim();
-}
-
 function requiredInt(name: string): number {
   const raw = required(name);
   const n = Number(raw);
@@ -56,11 +50,6 @@ function requiredInt(name: string): number {
     throw new Error(`Env var ${name} must be a positive integer, got: ${raw}`);
   }
   return n;
-}
-
-function bool(name: string): boolean {
-  const v = optional(name);
-  return v === "1" || v?.toLowerCase() === "true";
 }
 
 export function loadConfig(): Config {
@@ -81,7 +70,6 @@ export function loadConfig(): Config {
     maxTestAttempts: requiredInt("MAX_TEST_ATTEMPTS"),
     maxImplementTurns: requiredInt("MAX_IMPLEMENT_TURNS"),
     stateDb: required("STATE_DB"),
-    dryRun: bool("DRY_RUN"),
   };
 
   return config;

@@ -39,11 +39,12 @@ export async function implement(
   issue: IssueDetail,
   worktreePath: string,
   scope?: RepoScope,
+  priorWork?: string,
 ): Promise<RunResult> {
   return runner.run({
     label: `implement #${issue.number}${scope ? ` (${scope.repoKey})` : ""}`,
     cwd: worktreePath,
-    systemPrompt: implementSystemPrompt(issue, scope),
+    systemPrompt: implementSystemPrompt(issue, scope, priorWork),
     prompt: implementPrompt(),
     maxTurns: config.maxImplementTurns,
     enableAskHuman: true,

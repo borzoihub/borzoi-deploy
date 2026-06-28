@@ -174,11 +174,20 @@ export function freshWorktree(repo: Repo, branch: string, base: string): string 
     );
     return ensureWorktree(repo, branch, base);
   }
+  // Start-over semantics: drop both the worktree AND the branch, so the
+  // ensureWorktree below re-creates the branch fresh off origin/<base> rather
+  // than re-attaching to the stale one.
   removeWorktree(repo, branch);
+  deleteBranch(repo, branch);
   return ensureWorktree(repo, branch, base);
 }
 
-/** Remove a worktree and delete its branch (for abandoned cases). */
+/**
+ * Remove a worktree but KEEP its branch. This is the normal post-PR cleanup:
+ * once the PR is open the branch lives on the remote and the PR needs it, so we
+ * only reclaim the local worktree's disk. Branch deletion is a separate, explicit
+ * step (`deleteBranch`) reserved for genuinely abandoning unpushed work.
+ */
 export function removeWorktree(repo: Repo, branch: string): void {
   const path = worktreePath(repo, branch);
   if (existsSync(path)) {
@@ -188,9 +197,41 @@ export function removeWorktree(repo: Repo, branch: string): void {
       // ignore — best effort cleanup
     }
   }
+}
+
+/**
+ * Force-delete a local branch. Only for starting a fresh attempt over a stale
+ * branch (see `freshWorktree`) — never call this after a PR has been opened, the
+ * PR's head branch must survive.
+ */
+export function deleteBranch(repo: Repo, branch: string): void {
   try {
     git(repo.path, ["branch", "-D", branch]);
   } catch {
     // branch may not exist
   }
+}
+
+/**
+ * A short, human-readable summary of the work ALREADY on `branch` — commits
+ * ahead of base, the files they touched, and any still-uncommitted changes.
+ * Fed to a resuming agent so it builds on prior work instead of starting blind
+ * (every resume runs a fresh Agent SDK session with no memory of the previous
+ * one). Returns "" for genuinely fresh work (no commits, clean worktree).
+ */
+export function priorWorkSummary(repo: Repo, branch: string, base: string): string {
+  const wt = worktreePath(repo, branch);
+  if (!existsSync(wt)) return "";
+  const sections: string[] = [];
+  try {
+    const log = git(wt, ["log", `origin/${base}..HEAD`, "--oneline"]);
+    if (log) sections.push(`Commits already on this branch (vs origin/${base}):\n${log}`);
+    const stat = git(wt, ["diff", `origin/${base}...HEAD`, "--stat"]);
+    if (stat) sections.push(`Files changed by those commits:\n${stat}`);
+    const dirty = git(wt, ["status", "--porcelain"]);
+    if (dirty) sections.push(`Uncommitted changes still in the worktree:\n${dirty}`);
+  } catch {
+    // best effort — return whatever we gathered before the failure
+  }
+  return sections.join("\n\n");
 }

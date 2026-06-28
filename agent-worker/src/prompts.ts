@@ -55,18 +55,24 @@ export function triagePrompt(issue: IssueDetail): string {
   return issueContext(issue);
 }
 
-export function implementSystemPrompt(issue: IssueDetail, scope?: RepoScope): string {
+export function implementSystemPrompt(
+  issue: IssueDetail,
+  scope?: RepoScope,
+  priorWork?: string,
+): string {
+  const scopeText = scope ? scopeBlock(scope) : "";
   return [
     "You are a senior engineer fixing a customer support case for the Voltini energy-management system.",
     "You are working inside a git worktree of the target repository. Follow the repo's CLAUDE.md and CODING_STYLE.md conventions.",
     "",
     AUTONOMY_RULE,
     "",
-    ...(scope ? [scopeBlock(scope), ""] : []),
+    ...(scopeText ? [scopeText, ""] : []),
+    ...(priorWork ? [priorWorkBlock(priorWork), ""] : []),
     "Your task:",
     "1. Reproduce/understand the reported problem from the issue.",
     "2. Implement a correct, minimal fix that matches the surrounding code"
-    + (scope ? ", limited to THIS repository's scope above." : "."),
+    + (scopeText ? ", limited to THIS repository's scope above." : "."),
     "3. Add or update unit tests that capture the intent of the fix (see the repo's testing conventions).",
     "4. Run the repo's test suite and make it pass.",
     "5. Commit your work with a clear message referencing the issue number.",
@@ -85,11 +91,21 @@ export interface RepoScope {
 }
 
 function scopeBlock(s: RepoScope): string {
-  const lines = [
-    `This support case is being fixed across multiple repos. You are working ONLY on **${s.repoKey}**.`,
-    `Scope for this repo: ${s.scope}`,
-  ];
-  if (s.siblingRepoKeys.length > 0) {
+  const multi = s.siblingRepoKeys.length > 0;
+  // A recovered case may have no real per-repo scope (the triage scope lives
+  // only in the journal and is lost on a wipe). Don't print a misleading
+  // "Scope: (recovered…)" line or a "across multiple repos" claim that isn't
+  // true — fall back to the issue + the prior-work summary instead.
+  const hasScope = !!s.scope && !s.scope.startsWith("(recovered:");
+  if (!multi && !hasScope) return "";
+  const lines: string[] = [];
+  if (multi) {
+    lines.push(
+      `This support case is being fixed across multiple repos. You are working ONLY on **${s.repoKey}**.`,
+    );
+  }
+  if (hasScope) lines.push(`Scope for this repo: ${s.scope}`);
+  if (multi) {
     lines.push(
       `The rest of the fix is handled separately in: ${s.siblingRepoKeys.join(", ")}. ` +
         "Do NOT edit those repos here. If this repo depends on a shared `*-common` change happening in a " +
@@ -98,6 +114,15 @@ function scopeBlock(s: RepoScope): string {
     );
   }
   return lines.join("\n");
+}
+
+function priorWorkBlock(summary: string): string {
+  return [
+    "A previous attempt already started this fix on the current branch (a separate session — you do not have its memory). " +
+      "Review what is already here and CONTINUE from it: build on the existing commits and changes, and do not start over or revert them unless they are wrong.",
+    "",
+    summary,
+  ].join("\n");
 }
 
 export function implementPrompt(): string {

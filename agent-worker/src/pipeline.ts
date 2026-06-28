@@ -14,6 +14,7 @@ import {
   commitsAhead,
   hasWorktree,
   isWorktreeDirty,
+  priorWorkSummary,
   type Repo,
 } from "./repos.js";
 import { triage } from "./triage.js";
@@ -239,13 +240,11 @@ export class Pipeline {
       return false;
     }
 
-    if (result.repos.length === 0) {
-      // Fixable, but none of the required repos are cloned.
+    if (result.repos.length === 0 && result.missingRepos.length === 0) {
+      // Fixable, but triage named no repository at all to change — nothing to act on.
       this.needsHumanCase(
         issue,
-        `This looks fixable but the required repo(s) aren't cloned into REPOS_DIR` +
-          (result.missingRepoKeys.length ? ` (${result.missingRepoKeys.join(", ")})` : "") +
-          `. ${result.reason}`,
+        `This looks fixable but triage named no repository to change. ${result.reason}`,
       );
       return false;
     }
@@ -258,22 +257,25 @@ export class Pipeline {
     for (const t of result.repos) {
       this.deps.state.ensureRepoTask(issue.number, t.repoKey, { scope: t.scope, branch });
     }
-    // …and a parked sub-task per required-but-missing repo, so the case can't
-    // auto-resolve while part of the fix has nowhere to land.
-    for (const repoKey of result.missingRepoKeys) {
-      this.deps.state.ensureRepoTask(issue.number, repoKey, { scope: "(repo not cloned)", branch });
-      this.setRepoPhase(issue.number, repoKey, "NEEDS_HUMAN", {
-        error: "Required for the fix but not cloned into REPOS_DIR.",
+    // …and a still-pending sub-task per required-but-missing repo. It stays in the
+    // default BRANCH phase (NOT NEEDS_HUMAN): driveRepoTask just waits and retries
+    // every tick until a human clones the repo into REPOS_DIR. The case can't
+    // auto-resolve while part of the fix has nowhere to land, but it self-heals the
+    // moment the repo appears — no manual journal reset needed.
+    for (const t of result.missingRepos) {
+      this.deps.state.ensureRepoTask(issue.number, t.repoKey, {
+        scope: t.scope || "(repo not cloned yet — waiting)",
+        branch,
       });
     }
 
-    const repoList = result.repos.map((r) => r.repoKey).join(", ");
-    const missingNote = result.missingRepoKeys.length
-      ? ` (also needs, but missing: ${result.missingRepoKeys.join(", ")})`
+    const repoList = result.repos.map((r) => r.repoKey).join(", ") || "(none cloned yet)";
+    const missingNote = result.missingRepos.length
+      ? ` (waiting for not-yet-cloned: ${result.missingRepos.map((r) => r.repoKey).join(", ")})`
       : "";
     this.narrate(
       issue.number,
-      `Fixable — will open ${result.repos.length} PR(s) across: ${repoList}${missingNote}. Marking active.`,
+      `Fixable — will open ${result.repos.length + result.missingRepos.length} PR(s) across: ${repoList}${missingNote}. Marking active.`,
     );
     this.deps.github.addLabel(issue.number, LABEL_IN_PROGRESS);
     return true;
@@ -313,10 +315,11 @@ export class Pipeline {
           issue.number,
           `Found an existing branch "${branch}" in "${repo.key}" with committed work but no local PR record — resuming a crashed attempt: will verify, test, and open a PR.`,
         );
-        this.deps.state.ensureRepoTask(issue.number, repo.key, {
-          scope: "(recovered: committed branch from a previous attempt)",
-          branch,
-        });
+        // ensureRepoTask no-ops if the row already exists, so an original triage
+        // scope survives. On a wiped journal it creates a row with no scope — the
+        // resuming agent leans on the issue + the prior-work git summary instead
+        // of a meaningless "(recovered…)" placeholder.
+        this.deps.state.ensureRepoTask(issue.number, repo.key, { branch });
         this.setRepoPhase(issue.number, repo.key, "TEST");
         recovered = true;
         continue;
@@ -329,10 +332,7 @@ export class Pipeline {
           issue.number,
           `Found an existing worktree for "${repo.key}" with in-progress (uncommitted) changes — resuming the fix instead of starting over.`,
         );
-        this.deps.state.ensureRepoTask(issue.number, repo.key, {
-          scope: "(recovered: in-progress worktree from a previous attempt)",
-          branch,
-        });
+        this.deps.state.ensureRepoTask(issue.number, repo.key, { branch });
         this.setRepoPhase(issue.number, repo.key, "IMPLEMENT", { branch });
         recovered = true;
         continue;
@@ -355,10 +355,7 @@ export class Pipeline {
           issue.number,
           `No local work, but found an existing ${pr.state} PR for "${repo.key}" (${pr.url}) — assuming the work is done; updating the journal without re-checking.`,
         );
-        this.deps.state.ensureRepoTask(issue.number, repo.key, {
-          scope: "(recovered: PR already existed)",
-          branch,
-        });
+        this.deps.state.ensureRepoTask(issue.number, repo.key, { branch });
         this.setRepoPhase(issue.number, repo.key, "DONE", { prUrl: pr.url });
         recovered = true;
       } else if (pr) {
@@ -367,10 +364,7 @@ export class Pipeline {
           issue.number,
           `No local work, but found a closed (unmerged) PR for "${repo.key}" (${pr.url}) — leaving this for a human rather than redoing it.`,
         );
-        this.deps.state.ensureRepoTask(issue.number, repo.key, {
-          scope: "(recovered: closed PR)",
-          branch,
-        });
+        this.deps.state.ensureRepoTask(issue.number, repo.key, { branch });
         this.setRepoPhase(issue.number, repo.key, "NEEDS_HUMAN", {
           error: `A previous PR (${pr.url}) was closed without merging.`,
         });
@@ -402,7 +396,26 @@ export class Pipeline {
       return;
     }
 
-    const repo = this.repoOrThrow(task.repoKey);
+    // The repo may not be cloned yet. Rather than giving up (NEEDS_HUMAN), leave
+    // the sub-task in place and retry on a later tick — the case self-heals the
+    // moment a human clones the repo into REPOS_DIR.
+    const repo = findRepo(this.deps.config.reposDir, task.repoKey);
+    if (!repo) {
+      this.narrate(
+        issue.number,
+        `Waiting for repo "${task.repoKey}" to be cloned into REPOS_DIR — will retry next tick.`,
+      );
+      // Tell the human once (idempotent on the marker, so the per-tick retry
+      // never re-posts) that this case is parked on a missing repo.
+      this.deps.github.commentOnce(
+        issue.number,
+        `waiting-repo:${task.repoKey}`,
+        `🤖 This looks fixable, but the repository \`${task.repoKey}\` it needs isn't ` +
+          `available to me yet. I'll start working automatically as soon as it's cloned ` +
+          `into my workspace — no action needed on this issue.`,
+      );
+      return;
+    }
     const base = defaultBranch(repo);
     const branch = task.branch ?? `features/${issue.number}-${slugify(issue.title)}`;
     const scope = this.scopeFor(issue.number, task);
@@ -422,7 +435,11 @@ export class Pipeline {
     if (phase === "IMPLEMENT") {
       if (!this.linkProviders(issue, task, worktree)) return;
       this.narrate(issue.number, `Fixing "${task.repoKey}": ${task.scope ?? ""}`);
-      const result = await implement(this.deps.runner, this.deps.config, issue, worktree, scope);
+      // Feed any work a prior (crashed/recovered) attempt left on the branch so a
+      // fresh session continues it instead of starting blind. Empty for genuinely
+      // fresh work (clean worktree off base).
+      const priorWork = priorWorkSummary(repo, branch, base);
+      const result = await implement(this.deps.runner, this.deps.config, issue, worktree, scope, priorWork);
       if (result.blocked) return this.parkRepo(issue, task, "IMPLEMENT", result);
       if (result.isError) return this.needsHumanRepo(issue, task, "The implementation session errored out.");
       this.setRepoPhase(issue.number, task.repoKey, "TEST");
@@ -446,7 +463,14 @@ export class Pipeline {
           return this.needsHumanRepo(issue, task, `Tests still failing after ${attempts} attempts: ${verdict.summary}`);
         }
         this.narrate(issue.number, `Re-working "${task.repoKey}" to make tests pass…`);
-        const fix = await implement(this.deps.runner, this.deps.config, issue, worktree, scope);
+        const fix = await implement(
+          this.deps.runner,
+          this.deps.config,
+          issue,
+          worktree,
+          scope,
+          priorWorkSummary(repo, branch, base),
+        );
         if (fix.blocked) return this.parkRepo(issue, task, "IMPLEMENT", fix);
         if (fix.isError) return this.needsHumanRepo(issue, task, "The fix session errored out.");
         return this.driveRepoTask(issue, this.deps.state.getRepoTask(issue.number, task.repoKey)!);
@@ -500,7 +524,11 @@ export class Pipeline {
     }
   }
 
-  /** Remove every sub-task's worktree+branch once the case is fully settled. */
+  /**
+   * Reclaim every sub-task's worktree disk once the case is settled. Branches
+   * are intentionally KEPT — each opened PR needs its head branch — so this only
+   * removes the local worktrees.
+   */
   private cleanupWorktrees(issueNumber: number): void {
     for (const task of this.deps.state.getRepoTasks(issueNumber)) {
       if (!task.branch) continue;
