@@ -176,6 +176,14 @@ cases) gives the case a **fresh budget envelope** (resets `cost_usd`, keeps
 `lifetime_cost_usd`), un-sticks given-up repo sub-tasks, drops both labels to land
 on `NEW`, and lets the normal recover→work path continue with the new budget.
 
+**Idempotency** is a 👀 reaction the bot adds to the `/retry` comment when it acts
+(`acknowledgeCommand`); `findUnhandledCommand` skips any command it has already
+reacted to. So each `/retry` fires exactly once — across ticks, restarts, and
+multiple stacked `/retry` comments — and the maintainer gets a visible "picked it
+up" signal. The `needs_human_comment_id` anchor scopes the scan to the current
+hand-off; a null anchor (a case parked before this feature existed) scans all
+comments and relies on the reaction marker, so legacy cases stay `/retry`-able.
+
 Repos are **not** configured — a human pre-clones the workable repos into
 `REPOS_DIR` (symlinks are followed); any git repo found there is fair game. If a
 case needs a repo that isn't present, the bot keeps the case active and **retries

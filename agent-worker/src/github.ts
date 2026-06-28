@@ -327,26 +327,78 @@ export class GitHub {
   }
 
   /**
-   * The first comment AFTER `afterCommentId` that contains `command` and was
-   * posted by an authorized maintainer (not the bot, not a customer). Used to
-   * detect a `/retry` request on a parked needs-human case. A non-maintainer
-   * using the command is silently ignored — never acted on, never errored.
+   * The first UNHANDLED `command` comment from an authorized maintainer — i.e.
+   * one we haven't already reacted to. "Handled" is recorded as a 👀 reaction by
+   * the bot on the comment itself (see `acknowledgeCommand`), which is the
+   * idempotency key: durable across restarts, visible to the maintainer, and
+   * correct no matter how many times the case stops or how many `/retry`
+   * comments pile up — each is acted on exactly once.
+   *
+   * `afterCommentId` (the latest needs-human hand-off comment) scopes the scan to
+   * the current episode so a `/retry` typed before the hand-off doesn't count; a
+   * null anchor (e.g. a case parked before this was tracked) scans all comments,
+   * relying on the reaction marker for idempotency. A non-maintainer using the
+   * command is silently ignored.
    */
-  maintainerCommandAfter(
+  findUnhandledCommand(
     number: number,
-    afterCommentId: string,
+    afterCommentId: string | null,
     command: string,
   ): IssueComment | undefined {
     const detail = this.view(number);
-    const idx = detail.comments.findIndex((c) => c.id === afterCommentId);
+    const idx = afterCommentId ? detail.comments.findIndex((c) => c.id === afterCommentId) : -1;
     const tail = idx >= 0 ? detail.comments.slice(idx + 1) : detail.comments;
     const cmd = command.toLowerCase();
     for (const c of tail) {
       if (!c.author || c.author === this.config.botLogin) continue;
       if (!c.body.toLowerCase().includes(cmd)) continue;
-      if (this.isAuthorizedMaintainer(c.author)) return c;
+      if (!this.isAuthorizedMaintainer(c.author)) continue;
+      if (this.botReactedTo(c.id)) continue; // already handled
+      return c;
     }
     return undefined;
+  }
+
+  /** Whether the bot (the token's own user) has already reacted to a comment. */
+  private botReactedTo(commentNodeId: string): boolean {
+    try {
+      const out = this.gh([
+        "api",
+        "graphql",
+        "-f",
+        "query=query($id:ID!){node(id:$id){... on IssueComment{reactionGroups{viewerHasReacted}}}}",
+        "-f",
+        `id=${commentNodeId}`,
+      ]);
+      const data = JSON.parse(out) as {
+        data?: { node?: { reactionGroups?: Array<{ viewerHasReacted?: boolean }> } };
+      };
+      return (data.data?.node?.reactionGroups ?? []).some((g) => g.viewerHasReacted === true);
+    } catch {
+      return false; // can't tell → don't skip; the case leaving needs-human still guards it
+    }
+  }
+
+  /**
+   * Mark a command comment handled by reacting 👀 to it — the visible, durable
+   * "I picked this up" signal a maintainer sees, and the idempotency marker
+   * `findUnhandledCommand` checks. Best-effort: a failure won't double-process,
+   * because acting on the command immediately moves the case out of needs-human.
+   * `addReaction` is itself idempotent on GitHub.
+   */
+  acknowledgeCommand(commentNodeId: string): void {
+    try {
+      this.ghMutate([
+        "api",
+        "graphql",
+        "-f",
+        "query=mutation($id:ID!){addReaction(input:{subjectId:$id,content:EYES}){clientMutationId}}",
+        "-f",
+        `id=${commentNodeId}`,
+      ]);
+    } catch (e) {
+      console.warn(`[github] could not react to comment ${commentNodeId}:`, String(e));
+    }
   }
 
   /** Ensure the needs-human label exists in the repo (idempotent). */

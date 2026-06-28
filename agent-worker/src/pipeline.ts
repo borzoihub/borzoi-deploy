@@ -2,7 +2,7 @@ import type { Config } from "./config.js";
 import type { GitHub, IssueDetail } from "./github.js";
 import { LABEL_IN_PROGRESS, LABEL_NEEDS_HUMAN, RETRY_COMMAND } from "./github.js";
 import type { StateStore, CaseRow, RepoTaskRow, RepoPhase } from "./state.js";
-import type { ClaudeRunner, RunResult } from "./claude.js";
+import { ShutdownError, type ClaudeRunner, type RunResult } from "./claude.js";
 import {
   discoverRepos,
   findRepo,
@@ -160,14 +160,20 @@ export class Pipeline {
    * (generous) budget. No-op unless a qualifying command is present.
    */
   async retryIfRequested(issue: IssueDetail, row: CaseRow): Promise<void> {
-    if (row.phase !== "NEEDS_HUMAN" || !row.needsHumanCommentId) return;
-    const cmd = this.deps.github.maintainerCommandAfter(
+    if (row.phase !== "NEEDS_HUMAN") return;
+    // needsHumanCommentId may be null for a case parked before it was tracked —
+    // then we scan all comments and rely on the reaction marker for idempotency.
+    const cmd = this.deps.github.findUnhandledCommand(
       issue.number,
       row.needsHumanCommentId,
       RETRY_COMMAND,
     );
     if (!cmd) return;
 
+    // Mark it handled FIRST (👀): visible to the maintainer and the idempotency
+    // key, so this exact comment is never acted on twice — across ticks,
+    // restarts, or multiple stacked /retry comments.
+    this.deps.github.acknowledgeCommand(cmd.id);
     this.narrate(
       issue.number,
       `Maintainer @${cmd.author} requested \`${RETRY_COMMAND}\` — re-arming with a fresh $${this.deps.config.maxBudgetPerCaseUsd.toFixed(0)} budget.`,
@@ -259,6 +265,8 @@ export class Pipeline {
       try {
         await this.driveRepoTask(issue, this.deps.state.getRepoTask(issue.number, task.repoKey)!);
       } catch (e) {
+        // Operator shutdown: unwind without flagging needs-human or posting.
+        if (e instanceof ShutdownError) throw e;
         // A hard error on one repo shouldn't sink the others; flag it and move on.
         this.needsHumanRepo(issue, task, `Error while working this repo: ${String(e)}`);
       }

@@ -4,7 +4,7 @@ import { DateHelper } from "@digistrada/theworks-common";
 import { loadConfig, type Config } from "./config.js";
 import { GitHub, LABEL_IN_PROGRESS, LABEL_NEEDS_HUMAN, LABEL_WONTFIX } from "./github.js";
 import { StateStore, type Phase, type RepoTaskRow } from "./state.js";
-import { ClaudeRunner } from "./claude.js";
+import { ClaudeRunner, ShutdownError } from "./claude.js";
 import { Pipeline } from "./pipeline.js";
 
 /**
@@ -237,6 +237,7 @@ async function tick(deps: {
     try {
       await pipeline.resumeIfReplied(github.view(row.issueNumber), row);
     } catch (e) {
+      if (e instanceof ShutdownError) throw e;
       console.error(`[${ts()}]   resume failed for #${row.issueNumber}:`, e);
     }
   }
@@ -251,6 +252,7 @@ async function tick(deps: {
     try {
       await pipeline.retryIfRequested(github.view(row.issueNumber), row);
     } catch (e) {
+      if (e instanceof ShutdownError) throw e;
       console.error(`[${ts()}]   retry check failed for #${row.issueNumber}:`, e);
     }
   }
@@ -261,15 +263,18 @@ async function tick(deps: {
     try {
       await pipeline.processCase(github.view(row.issueNumber), state.get(row.issueNumber)!);
     } catch (e) {
+      if (e instanceof ShutdownError) throw e;
       console.error(`[${ts()}]   processing failed for #${row.issueNumber} (will retry next tick):`, e);
       state.update(row.issueNumber, { error: String(e) });
     }
   }
 
-  if (actionable.length === 0 && parked.length === 0) {
+  if (actionable.length === 0 && parked.length === 0 && needsHuman.length === 0) {
     console.log(`[${ts()}] tick #${n}: nothing actionable — idle.`);
   } else {
-    console.log(`[${ts()}] tick #${n}: done.`);
+    console.log(
+      `[${ts()}] tick #${n}: done${needsHuman.length ? ` (watched ${needsHuman.length} needs-human case(s) for /retry)` : ""}.`,
+    );
   }
 }
 
@@ -298,21 +303,44 @@ async function main(): Promise<void> {
   );
 
   let stopping = false;
-  const shutdown = () => {
+  // Set while idle so the signal handler can cut the poll sleep short.
+  let wake: (() => void) | undefined;
+  const shutdown = (signal: string) => {
+    if (stopping) {
+      // Second Ctrl-C/SIGTERM: don't wait for graceful unwind — force out.
+      console.log(`[${ts()}] ${signal} again — forcing exit.`);
+      process.exit(130);
+    }
     stopping = true;
+    console.log(
+      `[${ts()}] ${signal} received — stopping after the current task (aborting any running session). Press Ctrl-C again to force.`,
+    );
+    runner.shutdown(); // abort any in-flight Claude session so the tick unwinds now
+    wake?.(); // break the idle sleep immediately
   };
-  process.on("SIGTERM", shutdown);
-  process.on("SIGINT", shutdown);
+  process.on("SIGTERM", () => shutdown("SIGTERM"));
+  process.on("SIGINT", () => shutdown("SIGINT"));
 
   while (!stopping) {
     try {
       await tick({ config, github, state, pipeline });
     } catch (e) {
-      console.error(`[${ts()}] tick failed:`, e);
+      // A shutdown abort unwinds the tick on purpose — not an error to report.
+      if (!(e instanceof ShutdownError)) console.error(`[${ts()}] tick failed:`, e);
     }
     if (stopping) break;
     console.log(`[${ts()}] sleeping ${config.pollIntervalSec}s until next poll…`);
-    await new Promise((resolve) => setTimeout(resolve, intervalMs));
+    await new Promise<void>((resolve) => {
+      const t = setTimeout(() => {
+        wake = undefined;
+        resolve();
+      }, intervalMs);
+      wake = () => {
+        clearTimeout(t);
+        wake = undefined;
+        resolve();
+      };
+    });
   }
 
   state.close();

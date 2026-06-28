@@ -93,11 +93,40 @@ export interface RunResult {
 const LIMIT_SUBTYPES = new Set(["error_max_turns", "error_max_budget_usd"]);
 const LIMIT_THROW_RE = /Reached maximum (number of turns|budget)/i;
 
+/**
+ * Thrown when an in-flight session is cancelled because the worker is shutting
+ * down (operator hit Ctrl-C / SIGTERM). Distinct from a normal error so the
+ * pipeline does NOT mark the case needs-human or post a customer-facing comment
+ * on the way out — it just unwinds cleanly.
+ */
+export class ShutdownError extends Error {
+  constructor(message = "worker is shutting down") {
+    super(message);
+    this.name = "ShutdownError";
+  }
+}
+
 export class ClaudeRunner {
+  /** Abort controllers for every in-flight session, so shutdown can cancel them. */
+  private readonly active = new Set<AbortController>();
+  private shuttingDown = false;
+
   constructor(private readonly config: Config) {}
 
+  /**
+   * Cancel every in-flight session and refuse to start new ones. Called from the
+   * SIGINT/SIGTERM handler so Ctrl-C interrupts a running Claude session
+   * immediately instead of waiting for it (or the poll sleep) to finish.
+   */
+  shutdown(): void {
+    this.shuttingDown = true;
+    for (const c of this.active) c.abort();
+  }
+
   async run(opts: RunOptions): Promise<RunResult> {
+    if (this.shuttingDown) throw new ShutdownError();
     const abort = new AbortController();
+    this.active.add(abort);
     let askHuman: AskHumanHandle | undefined;
 
     const options: Options = {
@@ -217,6 +246,11 @@ export class ClaudeRunner {
         }
       }
     } catch (e) {
+      // Operator shutdown (Ctrl-C/SIGTERM) aborted the session — surface a
+      // distinct error so the pipeline unwinds without flagging needs-human.
+      if (this.shuttingDown && e instanceof AbortError) {
+        throw new ShutdownError();
+      }
       // ask_human aborts the session deliberately; that is not a failure.
       if (askHuman?.wasAsked() && e instanceof AbortError) {
         clearInterval(heartbeat);
@@ -252,6 +286,7 @@ export class ClaudeRunner {
       throw e;
     } finally {
       clearInterval(heartbeat);
+      this.active.delete(abort);
     }
 
     const limitHit = resultSubtype ? LIMIT_SUBTYPES.has(resultSubtype) : false;
