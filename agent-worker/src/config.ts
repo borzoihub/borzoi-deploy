@@ -12,15 +12,12 @@
  */
 
 export interface Config {
-  // Claude backend. Env var names mirror borzoi-backend (BEDROCK_*); the Agent
-  // SDK consumes the AWS standard chain, so main.ts maps these onto AWS_* +
-  // CLAUDE_CODE_USE_BEDROCK at startup.
-  useBedrock: boolean;
+  // Claude backend. The Agent SDK authenticates against a Claude subscription
+  // with a long-lived OAuth token (minted once via `claude setup-token`); no
+  // per-token API/Bedrock billing. main.ts surfaces the token into the
+  // environment the SDK reads at startup.
+  oauthToken: string;
   model: string;
-  bedrockRegion?: string;
-  bedrockAccessKeyId?: string;
-  bedrockSecretAccessKey?: string;
-  anthropicApiKey?: string;
 
   // GitHub
   ghToken: string;
@@ -67,26 +64,11 @@ function bool(name: string): boolean {
 }
 
 export function loadConfig(): Config {
-  // Use Bedrock when its credentials are present (borzoi naming); otherwise
-  // fall back to a first-party Anthropic key.
-  const bedrockAccessKeyId = optional("BEDROCK_ACCESS_KEY_ID");
-  const bedrockSecretAccessKey = optional("BEDROCK_SECRET_ACCESS_KEY");
-  const anthropicApiKey = optional("ANTHROPIC_API_KEY");
-  const useBedrock = Boolean(bedrockAccessKeyId && bedrockSecretAccessKey);
-
-  if (!useBedrock && !anthropicApiKey) {
-    throw new Error(
-      "No Claude backend configured: set BEDROCK_ACCESS_KEY_ID + BEDROCK_SECRET_ACCESS_KEY (+ BEDROCK_REGION), or ANTHROPIC_API_KEY",
-    );
-  }
-
   const config: Config = {
-    useBedrock,
-    model: required("BEDROCK_MODEL"),
-    bedrockRegion: optional("BEDROCK_REGION"),
-    bedrockAccessKeyId,
-    bedrockSecretAccessKey,
-    anthropicApiKey,
+    // Subscription auth: a long-lived OAuth token minted with `claude
+    // setup-token`. The Agent SDK reads CLAUDE_CODE_OAUTH_TOKEN from the env.
+    oauthToken: required("CLAUDE_CODE_OAUTH_TOKEN"),
+    model: required("MODEL"),
 
     ghToken: required("GH_TOKEN"),
     botLogin: required("BOT_GH_LOGIN"),
@@ -102,8 +84,5 @@ export function loadConfig(): Config {
     dryRun: bool("DRY_RUN"),
   };
 
-  if (useBedrock && !config.bedrockRegion) {
-    throw new Error("Bedrock credentials are set but BEDROCK_REGION is missing");
-  }
   return config;
 }

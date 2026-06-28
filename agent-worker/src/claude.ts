@@ -8,9 +8,38 @@ import { createAskHuman, type AskHumanHandle } from "./askHuman.js";
  * Each call runs one (possibly multi-turn) agent session inside a cloned repo
  * worktree, with permissions bypassed so it can edit files, run bash, git, gh
  * and npm unattended. The Agent SDK authenticates to the Claude backend itself
- * — for Bedrock via CLAUDE_CODE_USE_BEDROCK + the standard AWS credential chain
- * (we surface those from the environment in main.ts).
+ * — against a Claude subscription via CLAUDE_CODE_OAUTH_TOKEN (surfaced from the
+ * environment in main.ts).
  */
+
+/** How often to print a "still working" heartbeat during a session. */
+const HEARTBEAT_SEC = 15;
+/** Warn in the heartbeat if the SDK hasn't emitted a message for this long. */
+const STALL_WARN_SEC = 90;
+/**
+ * Abort a session that has produced NO output for this long — almost always a
+ * wedged request (e.g. API throttling that never recovers) rather than a
+ * slow inference. Aborting lets the case retry next tick instead of hanging the
+ * single-threaded poll loop forever.
+ */
+const STALL_ABORT_SEC = 360;
+
+/** A short, human-readable description of what a streamed SDK message represents. */
+function describeActivity(message: unknown): string | undefined {
+  const m = message as { type?: string; subtype?: string; message?: { content?: unknown[] } };
+  if (m.type === "assistant") {
+    const blocks = m.message?.content ?? [];
+    for (const b of blocks) {
+      const block = b as { type?: string; name?: string };
+      if (block.type === "tool_use") return `running tool: ${block.name ?? "?"}`;
+    }
+    return "thinking / writing";
+  }
+  if (m.type === "user") return "got tool result";
+  if (m.type === "result") return `result (${m.subtype ?? "?"})`;
+  if (m.type === "system") return `system${m.subtype ? `: ${m.subtype}` : ""}`;
+  return undefined;
+}
 
 export interface RunOptions {
   cwd: string;
@@ -79,6 +108,16 @@ export class ClaudeRunner {
 
     const label = opts.label ?? opts.cwd;
     const wantsStructured = opts.outputSchema !== undefined;
+
+    // Capture the Claude Code process's stderr — this is where API retry /
+    // throttle / error messages surface. We keep the most recent line so the
+    // heartbeat can show WHY a session has gone quiet during a stall.
+    let lastStderr = "";
+    options.stderr = (data: string) => {
+      const line = data.trim().split("\n").filter(Boolean).pop();
+      if (line) lastStderr = line;
+    };
+
     console.log(
       `[claude] ${label}: starting session (model ${this.config.model}, maxTurns ${opts.maxTurns ?? "default"}${wantsStructured ? ", structured output" : ""})`,
     );
@@ -90,8 +129,42 @@ export class ClaudeRunner {
     let resultSubtype: string | undefined;
     let turns: number | undefined;
 
+    // Liveness: a long implement/review session is otherwise silent for minutes.
+    // Emit a heartbeat with elapsed time, message count and last activity so an
+    // operator can tell it's still working — and warn if the SDK goes quiet
+    // (a possible stall) so a hang is visible rather than looking like progress.
+    const startedAt = Date.now();
+    let msgCount = 0;
+    let lastActivity = "starting up";
+    let lastMsgAt = startedAt;
+    let stalledOut = false;
+    const heartbeat = setInterval(() => {
+      const elapsed = Math.round((Date.now() - startedAt) / 1000);
+      const quietFor = Math.round((Date.now() - lastMsgAt) / 1000);
+      let stall = "";
+      if (quietFor >= STALL_WARN_SEC) {
+        // Surface the last SDK stderr line — that's where throttle/retry shows.
+        stall = ` ⚠ no activity for ${quietFor}s — possible stall${lastStderr ? ` | sdk: ${lastStderr}` : ""}`;
+      }
+      console.log(
+        `[claude] ${label}: …working — ${elapsed}s elapsed, ${msgCount} msgs, last: ${lastActivity}${stall}`,
+      );
+      if (quietFor >= STALL_ABORT_SEC && !stalledOut) {
+        stalledOut = true;
+        console.error(
+          `[claude] ${label}: aborting — no activity for ${quietFor}s (wedged session); the case will retry next tick.`,
+        );
+        abort.abort();
+      }
+    }, HEARTBEAT_SEC * 1000);
+    if (typeof heartbeat.unref === "function") heartbeat.unref();
+
     try {
       for await (const message of query({ prompt: opts.prompt, options })) {
+        msgCount += 1;
+        lastMsgAt = Date.now();
+        const activity = describeActivity(message);
+        if (activity) lastActivity = activity;
         if ("session_id" in message && message.session_id) {
           sessionId = message.session_id;
         }
@@ -108,6 +181,7 @@ export class ClaudeRunner {
     } catch (e) {
       // ask_human aborts the session deliberately; that is not a failure.
       if (askHuman?.wasAsked() && e instanceof AbortError) {
+        clearInterval(heartbeat);
         return {
           text,
           sessionId,
@@ -117,7 +191,15 @@ export class ClaudeRunner {
           question: askHuman.question(),
         };
       }
+      // We aborted a wedged session on the stall timeout — report it as an
+      // error result (not a thrown crash) so the caller can retry/route it.
+      if (stalledOut && e instanceof AbortError) {
+        clearInterval(heartbeat);
+        return { text, sessionId, structuredOutput, isError: true, blocked: false, question: undefined };
+      }
       throw e;
+    } finally {
+      clearInterval(heartbeat);
     }
 
     console.log(

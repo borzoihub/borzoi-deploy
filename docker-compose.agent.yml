@@ -7,7 +7,7 @@
 # Fresh-box runbook:
 #   1. git pull
 #   2. cp agent-worker/.env.example agent-worker/.env   # then fill in secrets
-#   3. printf '%s' "<github-pat>" > agent-worker/.ghtoken   # for npm GitHub Packages auth
+#   3. printf '%s' "<npm-registry-token>" > agent-worker/.npmtoken   # npm registry auth (today: a GitHub Packages PAT)
 #   4. mkdir -p agent-data/repos && git clone <each repo> into agent-data/repos/
 #   5. docker compose -f docker-compose.agent.yml up -d --build
 #
@@ -16,7 +16,7 @@ services:
     build:
       context: ./agent-worker
       secrets:
-        - ghtoken
+        - npm_token
     image: voltini-bugfixer:local
     restart: unless-stopped
     env_file: ./agent-worker/.env
@@ -26,5 +26,5 @@ services:
       - ./agent-data:/data
 
 secrets:
-  ghtoken:
-    file: ./agent-worker/.ghtoken
+  npm_token:
+    file: ./agent-worker/.npmtoken

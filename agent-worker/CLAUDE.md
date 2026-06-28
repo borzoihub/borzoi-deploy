@@ -56,16 +56,22 @@ The bot drives Claude headlessly via the **Claude Agent SDK**
 sessions running inside a repo worktree with permissions bypassed, so they can
 edit files, run bash/git/gh/npm unattended. Structured outputs (triage verdict,
 test result, review findings) use the SDK's `outputFormat` with zod-derived JSON
-schemas. The SDK authenticates to **AWS Bedrock** (model
-`eu.anthropic.claude-opus-4-8`). The `.env` uses the same names as
-borzoi-backend — `BEDROCK_REGION` / `BEDROCK_ACCESS_KEY_ID` /
-`BEDROCK_SECRET_ACCESS_KEY` (+ `BEDROCK_MODEL`) — which `main.ts` maps onto the
-`AWS_*` chain + `CLAUDE_CODE_USE_BEDROCK` the SDK expects.
+schemas. The SDK authenticates against a **Claude subscription** (Pro/Max) using
+a long-lived OAuth token — no per-token API/Bedrock billing. The token is minted
+once with `claude setup-token` (on any machine with a browser, logged into the
+subscription), set as `CLAUDE_CODE_OAUTH_TOKEN` in `.env`, and surfaced into the
+environment by `main.ts` for the SDK. The first-party model id is set via
+`MODEL` (e.g. `claude-opus-4-8`).
 
 > `theworks-be/AiService` is a single-shot Bedrock `Converse` wrapper — it
 > cannot drive an agentic coding loop, so it is intentionally not used here. We
-> reuse `@digistrada/theworks-common` for date/duration handling, and the same
-> Bedrock credential convention `AiService` consumes.
+> reuse `@digistrada/theworks-common` for date/duration handling.
+>
+> **Subscription caveats.** The token expires (~1 year) — regenerate before it
+> lapses. Subscription plans carry 5-hour rolling *and* weekly usage caps; this
+> pipeline is token-heavy per case (triage + implement + test + 5-perspective
+> review + fix loops on Opus), so a busy queue can hit them. Consider a cheaper
+> model for triage/test-verify if that becomes a problem.
 
 ---
 
@@ -122,14 +128,12 @@ saved Agent SDK session with the answer.
 
 ## Configuration
 
-All config is env-only (no committed secrets). Env var names reuse borzoi's
-where an equivalent exists (the `BEDROCK_*` family). See `.env.example` for the
-full list: `BEDROCK_REGION` / `BEDROCK_ACCESS_KEY_ID` / `BEDROCK_SECRET_ACCESS_KEY`
-/ `BEDROCK_MODEL`, `GH_TOKEN` / `BOT_GH_LOGIN` / `SUPPORT_REPO`, `REPOS_DIR`,
-and the behaviour knobs (`POLL_INTERVAL_SEC`, `MAX_REVIEW_ITERS`,
-`MAX_TEST_ATTEMPTS`, `MAX_IMPLEMENT_TURNS`, `STATE_DB`, `DRY_RUN`). Bedrock is
-used automatically when its credentials are present; otherwise set
-`ANTHROPIC_API_KEY` as a fallback.
+All config is env-only (no committed secrets). See `.env.example` for the full
+list: `CLAUDE_CODE_OAUTH_TOKEN` / `MODEL`, `GH_TOKEN` / `BOT_GH_LOGIN` /
+`SUPPORT_REPO`, `REPOS_DIR`, and the behaviour knobs (`POLL_INTERVAL_SEC`,
+`MAX_REVIEW_ITERS`, `MAX_TEST_ATTEMPTS`, `MAX_IMPLEMENT_TURNS`, `STATE_DB`,
+`DRY_RUN`). The worker refuses to start if `CLAUDE_CODE_OAUTH_TOKEN` or `MODEL`
+is missing.
 
 Repos are **not** configured — a human pre-clones the workable repos into
 `REPOS_DIR`; any git repo found there is fair game. If a case needs a repo
@@ -145,7 +149,7 @@ that isn't present, the bot parks it as `needs-human`.
 - `npm run typecheck` — `tsc --noEmit`.
 
 Deployment: `docker compose -f ../docker-compose.agent.yml up -d --build`
-(BuildKit secret `ghtoken` for GitHub Packages auth; `restart: unless-stopped`
+(BuildKit secret `npm_token` for npm registry auth; `restart: unless-stopped`
 auto-starts on boot). See the compose file header for the fresh-box runbook.
 
 ---
@@ -154,6 +158,6 @@ auto-starts on boot). See the compose file header for the fresh-box runbook.
 
 `@digistrada/theworks-common` is consumed from the GitHub npm registry (the
 `@digistrada` scope is mapped in `~/.npmrc` locally and via the BuildKit
-`ghtoken` secret in Docker). Use it for date/duration handling — never hand-roll
+`npm_token` secret in Docker). Use it for date/duration handling — never hand-roll
 dates. To change it, follow its own deploy/sync workflow in
 `../../theworks-common/CLAUDE.md`.

@@ -4,16 +4,22 @@ import { LABEL_IN_PROGRESS, LABEL_NEEDS_HUMAN } from "./github.js";
 import type { StateStore, CaseRow, RepoTaskRow, RepoPhase } from "./state.js";
 import type { ClaudeRunner, RunResult } from "./claude.js";
 import {
+  discoverRepos,
   findRepo,
   defaultBranch,
   ensureWorktree,
+  freshWorktree,
   removeWorktree,
+  localBranchExists,
+  commitsAhead,
+  hasWorktree,
+  isWorktreeDirty,
   type Repo,
 } from "./repos.js";
 import { triage } from "./triage.js";
 import { implement, verifyTests } from "./implement.js";
 import { review, reviewFix, isBlocking, formatFindings } from "./review.js";
-import { openPr } from "./pr.js";
+import { openPr, findExistingPr } from "./pr.js";
 import { buildAndLink, packageName, dependsOn } from "./linking.js";
 import { resumeWithAnswerPrompt, type RepoScope } from "./prompts.js";
 
@@ -127,8 +133,14 @@ export class Pipeline {
   /** Advance a case as far as possible this invocation. */
   async processCase(issue: IssueDetail, row: CaseRow): Promise<void> {
     if (row.phase === "NEW") {
-      const planned = await this.triageAndPlan(issue);
-      if (!planned) return; // terminal (wontfix / needs-human) already handled
+      // First, recover any work a previous (possibly crashed, or pre-journal-wipe)
+      // attempt left behind — an open PR or a branch with commits — so we never
+      // start over on a case that's already done or half-done.
+      const recovered = this.recoverExistingWork(issue);
+      if (!recovered) {
+        const planned = await this.triageAndPlan(issue);
+        if (!planned) return; // terminal (wontfix / needs-human) already handled
+      }
     }
 
     // Drive sub-tasks provider-first, so a shared `*-common` change is fully
@@ -217,7 +229,6 @@ export class Pipeline {
   private async triageAndPlan(issue: IssueDetail): Promise<boolean> {
     this.narrate(issue.number, `Investigating "${issue.title}"…`);
     const reposDir = this.deps.config.reposDir;
-    const { discoverRepos } = await import("./repos.js");
     const available = discoverRepos(reposDir).map((r) => r.key);
     const result = await triage(this.deps.runner, reposDir, available, issue);
 
@@ -268,6 +279,112 @@ export class Pipeline {
     return true;
   }
 
+  /**
+   * Before triaging, look for work a previous run already did for this issue —
+   * even if our journal was wiped. The branch name is deterministic
+   * (`features/<n>-<slug>`), so we can probe every available repo.
+   *
+   * We look LOCALLY FIRST — a crashed attempt leaves a branch/worktree right
+   * here in the clone, no network needed:
+   *  - in-progress (uncommitted) worktree → resume at IMPLEMENT (finish + commit)
+   *  - committed branch, clean, no PR     → resume at TEST (verify → review → PR)
+   *
+   * GitHub is only consulted as a FALLBACK, for the one case the local clone
+   * can't tell us about: a previous run that FINISHED — opened a PR and then
+   * removed its worktree (the normal DONE cleanup). Then nothing survives
+   * locally and the PR is the only evidence the work is already done.
+   *
+   * Returns true if anything was recovered (triage is then skipped).
+   */
+  private recoverExistingWork(issue: IssueDetail): boolean {
+    const slug = slugify(issue.title);
+    const branch = `features/${issue.number}-${slug}`;
+    let recovered = false;
+
+    for (const repo of discoverRepos(this.deps.config.reposDir)) {
+      const base = defaultBranch(repo);
+
+      // 1) Local signals — no network.
+      const committed = localBranchExists(repo, branch) && commitsAhead(repo, branch, base) > 0;
+      const dirty = isWorktreeDirty(repo, branch);
+
+      if (committed && !dirty) {
+        this.narrate(
+          issue.number,
+          `Found an existing branch "${branch}" in "${repo.key}" with committed work but no local PR record — resuming a crashed attempt: will verify, test, and open a PR.`,
+        );
+        this.deps.state.ensureRepoTask(issue.number, repo.key, {
+          scope: "(recovered: committed branch from a previous attempt)",
+          branch,
+        });
+        this.setRepoPhase(issue.number, repo.key, "TEST");
+        recovered = true;
+        continue;
+      }
+      if (committed || dirty) {
+        // Uncommitted (or mixed) changes in an existing worktree → DON'T discard
+        // them and start over. Resume implementation so the agent finishes and
+        // commits what's there, then it flows on to test/review/PR.
+        this.narrate(
+          issue.number,
+          `Found an existing worktree for "${repo.key}" with in-progress (uncommitted) changes — resuming the fix instead of starting over.`,
+        );
+        this.deps.state.ensureRepoTask(issue.number, repo.key, {
+          scope: "(recovered: in-progress worktree from a previous attempt)",
+          branch,
+        });
+        this.setRepoPhase(issue.number, repo.key, "IMPLEMENT", { branch });
+        recovered = true;
+        continue;
+      }
+      if (hasWorktree(repo, branch)) {
+        // An empty/clean leftover worktree — nothing to resume, but log it so the
+        // restart isn't silent (it will be reset cleanly before fresh work).
+        this.narrate(
+          issue.number,
+          `Found an empty leftover worktree for "${repo.key}" (no commits, no changes) — will reset it and start fresh.`,
+        );
+        continue;
+      }
+
+      // 2) No local trace — only NOW ask GitHub whether a finished run already
+      //    opened a PR for this issue (worktree since cleaned up).
+      const pr = findExistingPr(this.deps.config, repo, branch);
+      if (pr && (pr.state === "open" || pr.state === "merged")) {
+        this.narrate(
+          issue.number,
+          `No local work, but found an existing ${pr.state} PR for "${repo.key}" (${pr.url}) — assuming the work is done; updating the journal without re-checking.`,
+        );
+        this.deps.state.ensureRepoTask(issue.number, repo.key, {
+          scope: "(recovered: PR already existed)",
+          branch,
+        });
+        this.setRepoPhase(issue.number, repo.key, "DONE", { prUrl: pr.url });
+        recovered = true;
+      } else if (pr) {
+        // A closed-unmerged PR — don't silently redo or auto-close; flag it.
+        this.narrate(
+          issue.number,
+          `No local work, but found a closed (unmerged) PR for "${repo.key}" (${pr.url}) — leaving this for a human rather than redoing it.`,
+        );
+        this.deps.state.ensureRepoTask(issue.number, repo.key, {
+          scope: "(recovered: closed PR)",
+          branch,
+        });
+        this.setRepoPhase(issue.number, repo.key, "NEEDS_HUMAN", {
+          error: `A previous PR (${pr.url}) was closed without merging.`,
+        });
+        recovered = true;
+      }
+    }
+
+    if (recovered) {
+      this.setPhase(issue.number, "WORKING", { slug, title: issue.title });
+      this.deps.github.addLabel(issue.number, LABEL_IN_PROGRESS);
+    }
+    return recovered;
+  }
+
   /** Drive one repo sub-task IMPLEMENT → TEST → REVIEW → PR → DONE. */
   private async driveRepoTask(issue: IssueDetail, task: RepoTaskRow): Promise<void> {
     // Gate on provider siblings: don't start a consumer until the shared change
@@ -292,7 +409,10 @@ export class Pipeline {
     let phase = task.phase;
 
     if (phase === "BRANCH") {
-      ensureWorktree(repo, branch, base);
+      // Genuinely fresh work: start from a clean worktree off origin/<base> so a
+      // half-finished previous attempt can't leak in. (Recovered/crashed work
+      // never enters here — recoverExistingWork seeds it straight into TEST.)
+      freshWorktree(repo, branch, base);
       this.setRepoPhase(issue.number, task.repoKey, "IMPLEMENT", { branch });
       phase = "IMPLEMENT";
     }
@@ -363,6 +483,14 @@ export class Pipeline {
     }
 
     if (phase === "PR") {
+      // Guard against opening a duplicate: a prior run may already have pushed
+      // this branch and opened a PR (e.g. it crashed right after). Adopt it.
+      const existing = findExistingPr(this.deps.config, repo, branch);
+      if (existing && (existing.state === "open" || existing.state === "merged")) {
+        this.narrate(issue.number, `A PR for "${task.repoKey}" already exists (${existing.url}) — adopting it instead of opening a duplicate.`);
+        this.setRepoPhase(issue.number, task.repoKey, "DONE", { prUrl: existing.url });
+        return;
+      }
       this.narrate(issue.number, `Review clean — creating pull request for "${task.repoKey}"…`);
       const pr = openPr(this.deps.config, worktree, branch, base, issue, scope);
       this.setRepoPhase(issue.number, task.repoKey, "DONE", { prUrl: pr.url });

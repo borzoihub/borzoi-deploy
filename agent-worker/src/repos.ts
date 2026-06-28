@@ -54,6 +54,64 @@ export function findRepo(reposDir: string, key: string): Repo | undefined {
   return discoverRepos(reposDir).find((r) => r.key === key);
 }
 
+/** The `owner/name` GitHub slug from the repo's origin remote, if any. */
+export function repoSlug(repo: Repo): string | undefined {
+  try {
+    const url = git(repo.path, ["remote", "get-url", "origin"]);
+    const m = url.match(/github\.com[:/]([^/]+\/[^/]+?)(?:\.git)?$/);
+    return m?.[1];
+  } catch {
+    return undefined;
+  }
+}
+
+/** Does a local branch with this name exist in the repo? */
+export function localBranchExists(repo: Repo, branch: string): boolean {
+  try {
+    git(repo.path, ["rev-parse", "--verify", "--quiet", `refs/heads/${branch}`]);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** Is there already a worktree checked out for this branch? */
+export function hasWorktree(repo: Repo, branch: string): boolean {
+  return existsSync(worktreePath(repo, branch));
+}
+
+/**
+ * Does the branch's worktree have uncommitted or untracked changes — i.e. work
+ * a previous attempt started but didn't commit (e.g. it was killed mid-fix)?
+ */
+export function isWorktreeDirty(repo: Repo, branch: string): boolean {
+  const path = worktreePath(repo, branch);
+  if (!existsSync(path)) return false;
+  try {
+    return git(path, ["status", "--porcelain"]).length > 0;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * How many commits `branch` has that `origin/<base>` does not — i.e. how much
+ * work a previous attempt already committed. 0 means the branch is empty/at base.
+ */
+export function commitsAhead(repo: Repo, branch: string, base: string): number {
+  try {
+    git(repo.path, ["fetch", "origin", base]);
+  } catch {
+    // offline / no remote — compare against whatever we have locally
+  }
+  try {
+    const out = git(repo.path, ["rev-list", "--count", `origin/${base}..${branch}`]);
+    return Number(out) || 0;
+  } catch {
+    return 0;
+  }
+}
+
 /** The repo's default branch (e.g. "main"), via origin/HEAD. */
 export function defaultBranch(repo: Repo): string {
   // origin/HEAD -> refs/remotes/origin/main
@@ -90,16 +148,34 @@ export function ensureWorktree(repo: Repo, branch: string, base: string): string
   }
   // Make sure we branch off an up-to-date base.
   git(repo.path, ["fetch", "origin", base]);
-  // Create the branch + worktree off origin/<base>.
-  git(repo.path, [
-    "worktree",
-    "add",
-    "-b",
-    branch,
-    path,
-    `origin/${base}`,
-  ]);
+  if (localBranchExists(repo, branch)) {
+    // Branch already exists (e.g. a previous attempt committed but its worktree
+    // was pruned) — attach a worktree to it WITHOUT discarding its commits.
+    git(repo.path, ["worktree", "add", path, branch]);
+  } else {
+    // Fresh branch + worktree off origin/<base>.
+    git(repo.path, ["worktree", "add", "-b", branch, path, `origin/${base}`]);
+  }
   return path;
+}
+
+/**
+ * A guaranteed-clean worktree off origin/<base> — removes any stale worktree
+ * and branch first. Used when starting fresh work, so a half-finished previous
+ * attempt can't silently contaminate a new run. (For RESUMING prior work, use
+ * ensureWorktree, which preserves existing commits.)
+ */
+export function freshWorktree(repo: Repo, branch: string, base: string): string {
+  // Refuse to throw away uncommitted work — recovery should have caught a dirty
+  // worktree before we get here, but never destroy changes silently if not.
+  if (isWorktreeDirty(repo, branch)) {
+    console.warn(
+      `[repos] ${repo.key}: worktree for ${branch} has uncommitted changes — reusing it instead of resetting.`,
+    );
+    return ensureWorktree(repo, branch, base);
+  }
+  removeWorktree(repo, branch);
+  return ensureWorktree(repo, branch, base);
 }
 
 /** Remove a worktree and delete its branch (for abandoned cases). */

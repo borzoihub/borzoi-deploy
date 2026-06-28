@@ -18,21 +18,12 @@ import { Pipeline } from "./pipeline.js";
 const ACTIONABLE_PHASES: Phase[] = ["NEW", "WORKING"];
 
 /**
- * Map our borzoi-style BEDROCK_* config onto what the Claude Agent SDK reads:
- * the AWS standard credential chain + CLAUDE_CODE_USE_BEDROCK. Done once at
- * startup so spawned Claude Code sessions inherit it.
+ * Surface the subscription OAuth token into the environment the Claude Agent
+ * SDK reads (CLAUDE_CODE_OAUTH_TOKEN). Done once at startup so spawned Claude
+ * Code sessions inherit it and authenticate against the subscription.
  */
 function applyClaudeBackendEnv(config: Config): void {
-  if (config.useBedrock) {
-    process.env["CLAUDE_CODE_USE_BEDROCK"] = "1";
-    if (config.bedrockRegion) process.env["AWS_REGION"] = config.bedrockRegion;
-    if (config.bedrockAccessKeyId) process.env["AWS_ACCESS_KEY_ID"] = config.bedrockAccessKeyId;
-    if (config.bedrockSecretAccessKey) {
-      process.env["AWS_SECRET_ACCESS_KEY"] = config.bedrockSecretAccessKey;
-    }
-  } else if (config.anthropicApiKey) {
-    process.env["ANTHROPIC_API_KEY"] = config.anthropicApiKey;
-  }
+  process.env["CLAUDE_CODE_OAUTH_TOKEN"] = config.oauthToken;
 }
 
 function setupGitAuth(config: Config): void {

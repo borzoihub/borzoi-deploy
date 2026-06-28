@@ -27,11 +27,14 @@ RUN git config --system --add safe.directory '*'
 
 COPY package*.json ./
 
-# Install with a BuildKit secret for GitHub Packages auth — never baked into a layer.
-RUN --mount=type=secret,id=ghtoken \
-    if [ -f /run/secrets/ghtoken ]; then \
+# Install with a BuildKit secret holding the npm registry auth token — never
+# baked into a layer. The registry below happens to be GitHub Packages today, so
+# the token is currently a GitHub PAT (packages:read); point the registry URL
+# elsewhere and any matching npm credential works just as well.
+RUN --mount=type=secret,id=npm_token \
+    if [ -f /run/secrets/npm_token ]; then \
       printf "//npm.pkg.github.com/:_authToken=%s\n@borzoihub:registry=https://npm.pkg.github.com\n@digistrada:registry=https://npm.pkg.github.com\n" \
-        "$(cat /run/secrets/ghtoken)" > .npmrc; \
+        "$(cat /run/secrets/npm_token)" > .npmrc; \
     fi && \
     npm ci && \
     rm -f .npmrc

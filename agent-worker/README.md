@@ -18,10 +18,11 @@ git pull
 
 # 1. Configure
 cp agent-worker/.env.example agent-worker/.env
-$EDITOR agent-worker/.env                       # Bedrock creds, GH_TOKEN, etc.
+$EDITOR agent-worker/.env                       # CLAUDE_CODE_OAUTH_TOKEN, GH_TOKEN, etc.
 
-# 2. GitHub Packages auth for `npm ci` (BuildKit secret, never baked into image)
-printf '%s' "<github-pat-with-packages:read>" > agent-worker/.ghtoken
+# 2. npm registry auth for `npm ci` (BuildKit secret, never baked into image).
+#    Registry is GitHub Packages today, so this is a GitHub PAT (packages:read).
+printf '%s' "<npm-registry-token>" > agent-worker/.npmtoken
 
 # 3. Clone the repos the bot may fix into the mounted repos dir
 mkdir -p agent-data/repos
