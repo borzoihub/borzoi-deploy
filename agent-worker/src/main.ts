@@ -204,13 +204,15 @@ async function tick(deps: {
 
   // Make the fetch result explicit: zero tickets found must read differently
   // from "found tickets but nothing actionable" — they have different causes
-  // (token/repo/access vs. all cases already triaged).
+  // (token/repo/access vs. all cases already triaged). We do NOT return early:
+  // completed cases are CLOSED (not in `open`), and their PRs still need the
+  // follow-up-feedback pass below, which works off the journal independently.
   if (open.length === 0) {
     console.log(
       `[${ts()}] tick #${n}: found NO open tickets in ${deps.config.supportRepo}. ` +
-        `If you expect some, check GH_TOKEN access + SUPPORT_REPO. Nothing to do.`,
+        `If you expect some, check GH_TOKEN access + SUPPORT_REPO. ` +
+        `Still checking completed PRs for maintainer feedback.`,
     );
-    return;
   }
   // Register any new issues first so describeTicket() can read their journal row.
   for (const issue of open) {
