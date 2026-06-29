@@ -21,8 +21,9 @@ services:
     restart: unless-stopped
     env_file: ./agent-worker/.env
     volumes:
-      # Host-side: clone the repos into ./agent-data/repos and the SQLite
-      # journal lives in ./agent-data/state.sqlite. Matches REPOS_DIR / STATE_DB.
+      # Host-side: clone the workable repos into ./agent-data/repos (matches
+      # REPOS_DIR). Case state lives CENTRALLY in voltini.energy-backend — the
+      # worker keeps no local DB — so this mount is only the repo workspace.
       - ./agent-data:/data
 
 secrets:

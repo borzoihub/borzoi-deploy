@@ -42,7 +42,14 @@ export interface Config {
    * scarce resource against the plan's rolling/weekly usage caps.
    */
   maxBudgetPerCaseUsd: number;
-  stateDb: string;
+
+  // Central backend (voltini.energy-backend). The worker keeps NO local DB —
+  // central is the single source of truth for all case state. `centralApiBaseUrl`
+  // is the backend origin (e.g. https://api.voltini.energy); `agentWorkerToken`
+  // is the long-lived service token minted there with
+  // `npm run mint:agent-worker-token`.
+  centralApiBaseUrl: string;
+  agentWorkerToken: string;
 }
 
 function required(name: string): string {
@@ -89,7 +96,8 @@ export function loadConfig(): Config {
     maxTestAttempts: requiredInt("MAX_TEST_ATTEMPTS"),
     maxImplementTurns: requiredInt("MAX_IMPLEMENT_TURNS"),
     maxBudgetPerCaseUsd: requiredFloat("MAX_BUDGET_PER_CASE_USD"),
-    stateDb: required("STATE_DB"),
+    centralApiBaseUrl: required("CENTRAL_API_BASE_URL"),
+    agentWorkerToken: required("AGENT_WORKER_TOKEN"),
   };
 
   return config;

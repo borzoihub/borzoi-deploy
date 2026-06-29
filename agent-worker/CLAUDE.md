@@ -77,8 +77,12 @@ environment by `main.ts` for the SDK. The first-party model id is set via
 
 ## Pipeline (per case)
 
-A SQLite journal (`state.ts`) records each case's phase so a restart resumes in
-place; GitHub labels remain the customer-facing source of truth.
+The case journal lives **centrally** in `voltini.energy-backend` (the worker
+keeps no local DB); `state.ts` is a thin async HTTP client over its
+`/api/support/agent/*` endpoints, authenticated with the agent-worker service
+token. A restart resumes in place by reading central. GitHub labels remain the
+customer-facing source of truth. Central is now a hard dependency — if it's
+unreachable a tick fails and retries rather than advancing on stale state.
 
 ```
 NEW ── triage ──► not fixable ─────────────────► WONTFIX (close, Avvisad)
@@ -136,7 +140,7 @@ re-notified. Gates and safety:
 | `config.ts` | Strict env loading; throws on any missing required value. |
 | `github.ts` | `gh` CLI wrapper, status derivation, issue + PR comment polling, reactions. |
 | `repos.ts` | Discover pre-cloned repos in `REPOS_DIR`; git worktree create/remove/sync. |
-| `state.ts` | SQLite resume journal (one row per issue). |
+| `state.ts` | Central case-journal HTTP client (over voltini.energy-backend's `/api/support/agent/*`). |
 | `claude.ts` | Agent SDK `query()` wrapper (cwd, model, bypass, resume, structured output). |
 | `askHuman.ts` | The `ask_human` MCP tool + parked-state signalling. |
 | `triage.ts` | Triage session → `{ fixable, repoKey, reason }`. |
@@ -152,9 +156,10 @@ re-notified. Gates and safety:
 
 All config is env-only (no committed secrets). See `.env.example` for the full
 list: `CLAUDE_CODE_OAUTH_TOKEN` / `MODEL`, `GH_TOKEN` / `BOT_GH_LOGIN` /
-`SUPPORT_REPO`, `REPOS_DIR`, and the behaviour knobs (`POLL_INTERVAL_SEC`,
-`MAX_REVIEW_ITERS`, `MAX_TEST_ATTEMPTS`, `MAX_IMPLEMENT_TURNS`,
-`MAX_BUDGET_PER_CASE_USD`, `STATE_DB`).
+`SUPPORT_REPO`, `REPOS_DIR`, the central-backend connection
+(`CENTRAL_API_BASE_URL` / `AGENT_WORKER_TOKEN`), and the behaviour knobs
+(`POLL_INTERVAL_SEC`, `MAX_REVIEW_ITERS`, `MAX_TEST_ATTEMPTS`,
+`MAX_IMPLEMENT_TURNS`, `MAX_BUDGET_PER_CASE_USD`).
 The worker refuses to start if `CLAUDE_CODE_OAUTH_TOKEN` or `MODEL`
 is missing.
 
@@ -170,11 +175,13 @@ ceiling. Cost is "notional" (billing is via a Claude subscription, not per-token
 but it's a faithful proxy for tokens spent — the real scarce resource against the
 plan's rolling/weekly caps.
 
-Cost is persisted in the journal and logged as a running `$spent / $budget`
-line. Two case-level columns: `cost_usd` is the **current attempt** (what the
-envelope is measured against; reset to 0 on a `/retry`), and `lifetime_cost_usd`
-is the **durable per-bug total** across all attempts (use this one to report what
-a bug cost). Per-repo `cost_usd` gives the breakdown by repo. When the envelope
+Cost is persisted centrally (on the `support_case` row) and logged as a running
+`$spent / $budget` line. Two case-level columns: `cost_usd` is the **current
+attempt** (what the envelope is measured against; reset to 0 on a `/retry`), and
+`lifetime_cost_usd` is the **durable per-bug total** across all attempts (use
+this one to report what a bug cost). The per-repo `support_case_repo_task.cost_usd`
+gives the breakdown by repo. The `addCost` endpoint applies both in one atomic
+transaction and returns the new totals (so the worker needs no follow-up read). When the envelope
 is exhausted, phases **hard-fail** to needs-human (triage, implement,
 test-verify, review-fix — their output is a precondition to shipping), **except**
 the advisory review read-pass, which **soft-fails**: the

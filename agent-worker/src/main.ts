@@ -90,8 +90,8 @@ function describeRepoTask(t: RepoTaskRow): string {
  * One human-readable status line per open ticket, derived from the resume
  * journal — mirrors the case phases in state.ts and the gates in pipeline.ts.
  */
-function describeTicket(state: StateStore, issueNumber: number): string {
-  const c = state.get(issueNumber);
+async function describeTicket(state: StateStore, issueNumber: number): Promise<string> {
+  const c = await state.get(issueNumber);
   if (!c) return "New — queued for triage";
 
   switch (c.phase) {
@@ -109,7 +109,7 @@ function describeTicket(state: StateStore, issueNumber: number): string {
     // asserting an outcome — the real status lives in the per-repo rows.
     case "DONE":
     case "WORKING": {
-      const repos = state.getRepoTasks(issueNumber);
+      const repos = await state.getRepoTasks(issueNumber);
       const [first] = repos;
       if (!first) return c.phase === "DONE" ? "Done" : "Continuing work";
       if (repos.length === 1) return capitalize(describeRepoTask(first));
@@ -157,8 +157,8 @@ function phaseFromGitHub(
  * sub-task recovery still happens lazily in the pipeline (it re-derives branch/PR
  * state from git reality when it next processes the case).
  */
-function reconcileJournal(github: GitHub, state: StateStore): void {
-  const cases = state.all();
+async function reconcileJournal(github: GitHub, state: StateStore): Promise<void> {
+  const cases = await state.all();
   if (cases.length === 0) {
     console.log(`[${ts()}] reconcile: empty journal, nothing to sync.`);
     return;
@@ -177,7 +177,7 @@ function reconcileJournal(github: GitHub, state: StateStore): void {
       console.log(
         `[${ts()}] reconcile: #${c.issueNumber} ${c.phase} → ${truth} (GitHub: ${gh.state}${gh.labels.length ? ` [${gh.labels.join(", ")}]` : ""}).`,
       );
-      state.update(c.issueNumber, { phase: truth });
+      await state.update(c.issueNumber, { phase: truth });
       corrected++;
     }
   }
@@ -216,7 +216,7 @@ async function tick(deps: {
   }
   // Register any new issues first so describeTicket() can read their journal row.
   for (const issue of open) {
-    state.ensure(issue.number, issue.title);
+    await state.ensure(issue.number, issue.title);
   }
   const openNumbers = new Set(open.map((i) => i.number));
 
@@ -224,14 +224,14 @@ async function tick(deps: {
   // to do with it this tick.
   for (const issue of open) {
     console.log(
-      `[${ts()}] tick #${n}: Found ticket #${issue.number}: ${describeTicket(state, issue.number)}`,
+      `[${ts()}] tick #${n}: Found ticket #${issue.number}: ${await describeTicket(state, issue.number)}`,
     );
   }
 
-  const parked = state.allInPhase("BLOCKED").filter((r) => openNumbers.has(r.issueNumber));
-  const actionable = state
-    .all()
-    .filter((r) => ACTIONABLE_PHASES.includes(r.phase) && openNumbers.has(r.issueNumber));
+  const parked = (await state.allInPhase("BLOCKED")).filter((r) => openNumbers.has(r.issueNumber));
+  const actionable = (await state.all()).filter(
+    (r) => ACTIONABLE_PHASES.includes(r.phase) && openNumbers.has(r.issueNumber),
+  );
 
   // 1. Resume any parked case whose human question has been answered.
   for (const row of parked) {
@@ -247,9 +247,9 @@ async function tick(deps: {
   // 1.5 Re-run any needs-human case where an authorized maintainer commented
   // /retry. retryIfRequested drives the re-armed case itself, so these don't
   // need to also appear in the actionable pass below.
-  const needsHuman = state
-    .allInPhase("NEEDS_HUMAN")
-    .filter((r) => openNumbers.has(r.issueNumber));
+  const needsHuman = (await state.allInPhase("NEEDS_HUMAN")).filter((r) =>
+    openNumbers.has(r.issueNumber),
+  );
   for (const row of needsHuman) {
     try {
       await pipeline.retryIfRequested(github.view(row.issueNumber), row);
@@ -263,11 +263,15 @@ async function tick(deps: {
   for (const row of actionable) {
     console.log(`[${ts()}]   ▶ #${row.issueNumber} (${row.phase}): processing…`);
     try {
-      await pipeline.processCase(github.view(row.issueNumber), state.get(row.issueNumber)!);
+      await pipeline.processCase(github.view(row.issueNumber), (await state.get(row.issueNumber))!);
     } catch (e) {
       if (e instanceof ShutdownError) throw e;
       console.error(`[${ts()}]   processing failed for #${row.issueNumber} (will retry next tick):`, e);
-      state.update(row.issueNumber, { error: String(e) });
+      try {
+        await state.update(row.issueNumber, { error: String(e) });
+      } catch (updateErr) {
+        console.error(`[${ts()}]   (could not record error centrally for #${row.issueNumber}):`, updateErr);
+      }
     }
   }
 
@@ -275,13 +279,14 @@ async function tick(deps: {
   // are CLOSED, so they are NOT in `open`/`openNumbers` — this pass works off the
   // journal independently. A case is watchable while it has a DONE sub-task with an
   // open PR we haven't stopped watching.
-  const withPrFeedback = state
-    .allInPhase("DONE")
-    .filter((c) =>
-      state
-        .getRepoTasks(c.issueNumber)
-        .some((t) => t.phase === "DONE" && t.prUrl && !t.prWatchClosed),
-    );
+  const doneCases = await state.allInPhase("DONE");
+  const withPrFeedback: typeof doneCases = [];
+  for (const c of doneCases) {
+    const tasks = await state.getRepoTasks(c.issueNumber);
+    if (tasks.some((t) => t.phase === "DONE" && t.prUrl && !t.prWatchClosed)) {
+      withPrFeedback.push(c);
+    }
+  }
   for (const row of withPrFeedback) {
     console.log(`[${ts()}]   💬 #${row.issueNumber}: checking PR(s) for maintainer feedback…`);
     try {
@@ -313,7 +318,7 @@ async function main(): Promise<void> {
   applyClaudeBackendEnv(config);
 
   const github = new GitHub(config);
-  const state = new StateStore(config.stateDb);
+  const state = new StateStore(config.centralApiBaseUrl, config.agentWorkerToken);
   const runner = new ClaudeRunner(config);
   const pipeline = new Pipeline({ config, github, state, runner });
 
@@ -322,7 +327,7 @@ async function main(): Promise<void> {
 
   // GitHub is the source of truth; the journal is only a resume cache. Correct
   // any drift (e.g. a manual GitHub action or a crash) before the first poll.
-  reconcileJournal(github, state);
+  await reconcileJournal(github, state);
 
   const intervalMs = DateHelper.duration(config.pollIntervalSec, "seconds").asMilliseconds();
   console.log(

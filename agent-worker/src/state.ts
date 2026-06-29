@@ -1,20 +1,23 @@
-import Database from "better-sqlite3";
-import { DateHelper } from "@digistrada/theworks-common";
-
 /**
- * SQLite resume journal.
+ * Central case journal — HTTP client.
  *
- * GitHub labels are the customer-facing source of truth for a case's status;
- * this table is the worker's internal memory of how far each case got and the
- * artifacts it needs to resume after a crash/restart.
+ * The worker keeps NO local database. Central (`voltini.energy-backend`) is the
+ * single source of truth for every case's state: the phase machine, cost, PR
+ * links, and the per-repo sub-tasks (branch, Agent SDK session id, attempt
+ * counters). This module is a thin async client over the backend's
+ * `/api/support/agent/*` endpoints, authenticated with the agent-worker service
+ * token. It deliberately mirrors the old SQLite `StateStore` method surface so
+ * the rest of the worker barely changed — every method just became `async`.
  *
- * A case can require fixes in SEVERAL repos (e.g. a bug that spans backend and
- * frontend), each producing its own branch and pull request. So state is split:
+ * GitHub labels remain the customer-facing source of truth for a case's status;
+ * this journal is the worker's internal memory of how far each case got and the
+ * artifacts it needs to resume after a crash/restart. A case can require fixes
+ * in SEVERAL repos, each producing its own branch and pull request — so state is
+ * split into case-level rows and per-(issue, repo) sub-tasks.
  *
- *  - `cases`      — one row per support-case issue (case-level lifecycle).
- *  - `case_repos` — one row per (issue, repo) sub-task the bot works on, each
- *                   with its own branch, phase, Agent SDK session and PR. A case
- *                   resolves only when every sub-task has opened a PR.
+ * Network failures propagate: the caller (the poll loop) treats a failed tick as
+ * "retry next tick" rather than advancing on stale state. The worker never holds
+ * a partial local copy to drift from.
  */
 
 /** Case-level lifecycle. Per-repo work lives in RepoPhase on the sub-tasks. */
@@ -37,8 +40,6 @@ export type RepoPhase =
   | "DONE" // PR opened
   | "BLOCKED" // waiting for a human reply to a question
   | "NEEDS_HUMAN"; // this repo gave up safely
-
-const TIMESTAMP_FORMAT = "YYYY-MM-DD HH:mm:ss";
 
 export interface CaseRow {
   issueNumber: number;
@@ -63,6 +64,8 @@ export interface CaseRow {
    * the manual label path).
    */
   needsHumanCommentId: string | null;
+  /** Customer-readable summary of how the bug was fixed (set on resolve). */
+  solutionSummary: string | null;
   updatedAt: string;
 }
 
@@ -94,317 +97,244 @@ export interface RepoTaskRow {
   /**
    * Stop watching this sub-task's PR for follow-up feedback. Set once the PR is
    * observed merged/closed (it can no longer be amended), so the post-completion
-   * PR-feedback poll doesn't re-query a dead PR every tick forever. The 👀
-   * reaction marker handles per-comment idempotency; this bounds WHICH PRs are
-   * still worth polling at all.
+   * PR-feedback poll doesn't re-query a dead PR every tick forever.
    */
   prWatchClosed: boolean;
+  /** Concise "what was wrong / how it was fixed" from the implement session. */
+  fixSummary: string | null;
   updatedAt: string;
 }
 
-interface RawCase {
-  issue_number: number;
-  phase: string;
-  slug: string | null;
+// --- Wire DTOs (match the backend's support-agent.service.ts contract) ------
+
+interface CaseDto {
+  issueNumber: number;
+  phase: string | null;
   title: string | null;
   error: string | null;
-  cost_usd: number;
-  lifetime_cost_usd: number;
-  needs_human_comment_id: string | null;
-  updated_at: string;
+  costUsd: number;
+  lifetimeCostUsd: number;
+  needsHumanCommentId: string | null;
+  solutionSummary: string | null;
+  updatedAt: string | null;
+  repoTasks: RepoTaskDto[];
 }
 
-interface RawRepoTask {
-  issue_number: number;
-  repo_key: string;
+interface RepoTaskDto {
+  repoKey: string;
   scope: string | null;
   phase: string;
   branch: string | null;
-  resume_phase: string | null;
-  session_id: string | null;
-  blocked_comment_id: string | null;
-  test_attempts: number;
-  review_iters: number;
-  pr_url: string | null;
+  resumePhase: string | null;
+  sessionId: string | null;
+  blockedCommentId: string | null;
+  testAttempts: number;
+  reviewIters: number;
+  prUrl: string | null;
   error: string | null;
-  cost_usd: number;
-  review_incomplete: number;
-  pr_watch_closed: number;
-  updated_at: string;
+  costUsd: number;
+  reviewIncomplete: boolean;
+  prWatchClosed: boolean;
+  fixSummary: string | null;
+  updatedAt: string;
 }
 
-function toCaseRow(raw: RawCase): CaseRow {
+interface CostResult {
+  costUsd: number;
+  lifetimeCostUsd: number;
+  repoCostUsd: number | null;
+}
+
+function toCaseRow(dto: CaseDto): CaseRow {
   return {
-    issueNumber: raw.issue_number,
-    phase: raw.phase as Phase,
-    slug: raw.slug,
-    title: raw.title,
-    error: raw.error,
-    costUsd: raw.cost_usd ?? 0,
-    lifetimeCostUsd: raw.lifetime_cost_usd ?? 0,
-    needsHumanCommentId: raw.needs_human_comment_id,
-    updatedAt: raw.updated_at,
+    issueNumber: dto.issueNumber,
+    phase: (dto.phase ?? "NEW") as Phase,
+    slug: null,
+    title: dto.title,
+    error: dto.error,
+    costUsd: dto.costUsd ?? 0,
+    lifetimeCostUsd: dto.lifetimeCostUsd ?? 0,
+    needsHumanCommentId: dto.needsHumanCommentId,
+    solutionSummary: dto.solutionSummary,
+    updatedAt: dto.updatedAt ?? "",
   };
 }
 
-function toRepoTaskRow(raw: RawRepoTask): RepoTaskRow {
+function toRepoTaskRow(issueNumber: number, dto: RepoTaskDto): RepoTaskRow {
   return {
-    issueNumber: raw.issue_number,
-    repoKey: raw.repo_key,
-    scope: raw.scope,
-    phase: raw.phase as RepoPhase,
-    branch: raw.branch,
-    resumePhase: raw.resume_phase as RepoPhase | null,
-    sessionId: raw.session_id,
-    blockedCommentId: raw.blocked_comment_id,
-    testAttempts: raw.test_attempts,
-    reviewIters: raw.review_iters,
-    prUrl: raw.pr_url,
-    error: raw.error,
-    costUsd: raw.cost_usd ?? 0,
-    reviewIncomplete: (raw.review_incomplete ?? 0) === 1,
-    prWatchClosed: (raw.pr_watch_closed ?? 0) === 1,
-    updatedAt: raw.updated_at,
+    issueNumber,
+    repoKey: dto.repoKey,
+    scope: dto.scope,
+    phase: dto.phase as RepoPhase,
+    branch: dto.branch,
+    resumePhase: (dto.resumePhase as RepoPhase | null) ?? null,
+    sessionId: dto.sessionId,
+    blockedCommentId: dto.blockedCommentId,
+    testAttempts: dto.testAttempts ?? 0,
+    reviewIters: dto.reviewIters ?? 0,
+    prUrl: dto.prUrl,
+    error: dto.error,
+    costUsd: dto.costUsd ?? 0,
+    reviewIncomplete: !!dto.reviewIncomplete,
+    prWatchClosed: !!dto.prWatchClosed,
+    fixSummary: dto.fixSummary,
+    updatedAt: dto.updatedAt ?? "",
   };
 }
 
 export class StateStore {
-  private readonly db: Database.Database;
+  private readonly baseUrl: string;
 
-  constructor(path: string) {
-    this.db = new Database(path);
-    this.db.pragma("journal_mode = WAL");
-    this.db.exec(`
-      CREATE TABLE IF NOT EXISTS cases (
-        issue_number INTEGER PRIMARY KEY,
-        phase        TEXT NOT NULL,
-        slug              TEXT,
-        title             TEXT,
-        error             TEXT,
-        cost_usd          REAL NOT NULL DEFAULT 0,
-        lifetime_cost_usd REAL NOT NULL DEFAULT 0,
-        needs_human_comment_id TEXT,
-        updated_at        TEXT NOT NULL
-      );
-      CREATE TABLE IF NOT EXISTS case_repos (
-        issue_number       INTEGER NOT NULL,
-        repo_key           TEXT NOT NULL,
-        scope              TEXT,
-        phase              TEXT NOT NULL,
-        branch             TEXT,
-        resume_phase       TEXT,
-        session_id         TEXT,
-        blocked_comment_id TEXT,
-        test_attempts      INTEGER NOT NULL DEFAULT 0,
-        review_iters       INTEGER NOT NULL DEFAULT 0,
-        pr_url             TEXT,
-        error              TEXT,
-        cost_usd           REAL NOT NULL DEFAULT 0,
-        review_incomplete  INTEGER NOT NULL DEFAULT 0,
-        pr_watch_closed    INTEGER NOT NULL DEFAULT 0,
-        updated_at         TEXT NOT NULL,
-        PRIMARY KEY (issue_number, repo_key)
-      );
-    `);
-    this.migrate();
+  constructor(
+    baseUrl: string,
+    private readonly token: string,
+  ) {
+    // Normalise: no trailing slash, so `${base}/api/...` is well-formed.
+    this.baseUrl = baseUrl.replace(/\/+$/, "");
   }
 
-  /**
-   * Add columns introduced after a DB was first created. `ADD COLUMN` is a
-   * no-op-if-present pattern here: SQLite has no "IF NOT EXISTS" for columns, so
-   * we just attempt each and ignore the "duplicate column name" error. New DBs
-   * already have them from CREATE TABLE above; this only patches older ones.
-   */
-  private migrate(): void {
-    const additions: Array<[string, string]> = [
-      ["cases", "cost_usd REAL NOT NULL DEFAULT 0"],
-      ["cases", "lifetime_cost_usd REAL NOT NULL DEFAULT 0"],
-      ["cases", "needs_human_comment_id TEXT"],
-      ["case_repos", "cost_usd REAL NOT NULL DEFAULT 0"],
-      ["case_repos", "review_incomplete INTEGER NOT NULL DEFAULT 0"],
-      ["case_repos", "pr_watch_closed INTEGER NOT NULL DEFAULT 0"],
-    ];
-    for (const [table, column] of additions) {
-      try {
-        this.db.exec(`ALTER TABLE ${table} ADD COLUMN ${column}`);
-      } catch (e) {
-        if (!/duplicate column name/i.test(String(e))) throw e;
-      }
+  private async request<T>(
+    method: string,
+    path: string,
+    body?: unknown,
+  ): Promise<T> {
+    const res = await fetch(`${this.baseUrl}${path}`, {
+      method,
+      headers: {
+        Authorization: `Bearer ${this.token}`,
+        ...(body !== undefined ? { "Content-Type": "application/json" } : {}),
+      },
+      body: body !== undefined ? JSON.stringify(body) : undefined,
+    });
+    if (res.status === 404) {
+      // Distinguished from other failures: a missing row is a valid "not found"
+      // for get-style calls, which the callers handle as `undefined`.
+      throw new NotFoundError(`${method} ${path} → 404`);
     }
+    if (!res.ok) {
+      const text = await res.text().catch(() => "");
+      throw new Error(`Central API ${method} ${path} failed: ${res.status} ${text.slice(0, 300)}`);
+    }
+    if (res.status === 204) return undefined as T;
+    return (await res.json()) as T;
   }
 
-  private now(): string {
-    return DateHelper.format(new Date(), TIMESTAMP_FORMAT);
+  private async maybe<T>(p: Promise<T>): Promise<T | undefined> {
+    try {
+      return await p;
+    } catch (e) {
+      if (e instanceof NotFoundError) return undefined;
+      throw e;
+    }
   }
 
   // --- Case-level -----------------------------------------------------------
 
-  get(issueNumber: number): CaseRow | undefined {
-    const raw = this.db
-      .prepare("SELECT * FROM cases WHERE issue_number = ?")
-      .get(issueNumber) as RawCase | undefined;
-    return raw ? toCaseRow(raw) : undefined;
+  async get(issueNumber: number): Promise<CaseRow | undefined> {
+    const dto = await this.maybe(
+      this.request<CaseDto>("GET", `/api/support/agent/cases/${issueNumber}`),
+    );
+    return dto ? toCaseRow(dto) : undefined;
   }
 
-  all(): CaseRow[] {
-    const raws = this.db
-      .prepare("SELECT * FROM cases ORDER BY issue_number")
-      .all() as RawCase[];
-    return raws.map(toCaseRow);
+  async all(): Promise<CaseRow[]> {
+    const dtos = await this.request<CaseDto[]>("GET", `/api/support/agent/cases`);
+    return dtos.map(toCaseRow);
   }
 
-  allInPhase(phase: Phase): CaseRow[] {
-    return this.all().filter((c) => c.phase === phase);
+  async allInPhase(phase: Phase): Promise<CaseRow[]> {
+    const dtos = await this.request<CaseDto[]>(
+      "GET",
+      `/api/support/agent/cases?phase=${encodeURIComponent(phase)}`,
+    );
+    return dtos.map(toCaseRow);
   }
 
-  /** Insert a brand-new case in the NEW phase. No-op if it already exists. */
-  ensure(issueNumber: number, title: string): CaseRow {
-    const existing = this.get(issueNumber);
-    if (existing) return existing;
-    this.db
-      .prepare(
-        `INSERT INTO cases (issue_number, phase, title, updated_at)
-         VALUES (?, 'NEW', ?, ?)`,
-      )
-      .run(issueNumber, title, this.now());
-    return this.get(issueNumber)!;
+  /** Register a case (idempotent upsert), returning its current row. */
+  async ensure(issueNumber: number, title: string): Promise<CaseRow> {
+    const dto = await this.request<CaseDto>(
+      "PUT",
+      `/api/support/agent/cases/${issueNumber}`,
+      { title },
+    );
+    return toCaseRow(dto);
   }
 
   /** Patch a case's mutable columns. Only provided fields are written. */
-  update(
+  async update(
     issueNumber: number,
-    patch: Partial<Omit<CaseRow, "issueNumber" | "updatedAt">>,
-  ): void {
-    const columns: Record<keyof Omit<CaseRow, "issueNumber" | "updatedAt">, string> = {
-      phase: "phase",
-      slug: "slug",
-      title: "title",
-      error: "error",
-      costUsd: "cost_usd",
-      lifetimeCostUsd: "lifetime_cost_usd",
-      needsHumanCommentId: "needs_human_comment_id",
-    };
-    this.patch("cases", columns, patch, ["issue_number = ?"], [issueNumber]);
+    patch: Partial<Omit<CaseRow, "issueNumber" | "updatedAt" | "slug">>,
+  ): Promise<void> {
+    await this.request("PATCH", `/api/support/agent/cases/${issueNumber}`, patch);
   }
 
   /**
    * Atomically add to the cumulative cost of a case (and, when given, the repo
-   * sub-task that incurred it). Used after every Agent SDK session so the case
-   * budget envelope and the per-bug cost record stay current.
+   * sub-task that incurred it). Returns the case's new current-attempt total so
+   * callers don't need a follow-up read. No-op (returns current) for deltas ≤ 0.
    */
-  addCost(issueNumber: number, repoKey: string | null, deltaUsd: number): void {
-    if (!(deltaUsd > 0)) return;
-    const now = this.now();
-    // cost_usd is the current-attempt counter (reset on /retry); lifetime is the
-    // durable total that survives retries.
-    this.db
-      .prepare(
-        "UPDATE cases SET cost_usd = cost_usd + ?, lifetime_cost_usd = lifetime_cost_usd + ?, updated_at = ? WHERE issue_number = ?",
-      )
-      .run(deltaUsd, deltaUsd, now, issueNumber);
-    if (repoKey) {
-      this.db
-        .prepare(
-          "UPDATE case_repos SET cost_usd = cost_usd + ?, updated_at = ? WHERE issue_number = ? AND repo_key = ?",
-        )
-        .run(deltaUsd, now, issueNumber, repoKey);
-    }
+  async addCost(
+    issueNumber: number,
+    repoKey: string | null,
+    deltaUsd: number,
+  ): Promise<number> {
+    const result = await this.request<CostResult>(
+      "POST",
+      `/api/support/agent/cases/${issueNumber}/cost`,
+      { repoKey, deltaUsd },
+    );
+    return result.costUsd ?? 0;
   }
 
   // --- Per-repo sub-tasks ---------------------------------------------------
 
-  /** Create a repo sub-task in the BRANCH phase. No-op if it already exists. */
-  ensureRepoTask(
+  /** Create a repo sub-task in the BRANCH phase (idempotent). */
+  async ensureRepoTask(
     issueNumber: number,
     repoKey: string,
     fields: { scope?: string; branch?: string },
-  ): RepoTaskRow {
-    const existing = this.getRepoTask(issueNumber, repoKey);
-    if (existing) return existing;
-    this.db
-      .prepare(
-        `INSERT INTO case_repos (issue_number, repo_key, scope, phase, branch, updated_at)
-         VALUES (?, ?, ?, 'BRANCH', ?, ?)`,
-      )
-      .run(issueNumber, repoKey, fields.scope ?? null, fields.branch ?? null, this.now());
-    return this.getRepoTask(issueNumber, repoKey)!;
+  ): Promise<RepoTaskRow> {
+    const dto = await this.request<RepoTaskDto>(
+      "PUT",
+      `/api/support/agent/cases/${issueNumber}/repos/${encodeURIComponent(repoKey)}`,
+      { scope: fields.scope ?? null, branch: fields.branch ?? null },
+    );
+    return toRepoTaskRow(issueNumber, dto);
   }
 
-  getRepoTask(issueNumber: number, repoKey: string): RepoTaskRow | undefined {
-    const raw = this.db
-      .prepare("SELECT * FROM case_repos WHERE issue_number = ? AND repo_key = ?")
-      .get(issueNumber, repoKey) as RawRepoTask | undefined;
-    return raw ? toRepoTaskRow(raw) : undefined;
+  async getRepoTask(
+    issueNumber: number,
+    repoKey: string,
+  ): Promise<RepoTaskRow | undefined> {
+    // Repo tasks are embedded in the case payload — one fetch covers both.
+    const tasks = await this.getRepoTasks(issueNumber);
+    return tasks.find((t) => t.repoKey === repoKey);
   }
 
-  /** All sub-tasks for a case, in stable (repo_key) order. */
-  getRepoTasks(issueNumber: number): RepoTaskRow[] {
-    const raws = this.db
-      .prepare("SELECT * FROM case_repos WHERE issue_number = ? ORDER BY repo_key")
-      .all(issueNumber) as RawRepoTask[];
-    return raws.map(toRepoTaskRow);
+  /** All sub-tasks for a case, in stable (repoKey) order. */
+  async getRepoTasks(issueNumber: number): Promise<RepoTaskRow[]> {
+    const dto = await this.maybe(
+      this.request<CaseDto>("GET", `/api/support/agent/cases/${issueNumber}`),
+    );
+    if (!dto) return [];
+    return dto.repoTasks.map((t) => toRepoTaskRow(issueNumber, t));
   }
 
-  updateRepoTask(
+  async updateRepoTask(
     issueNumber: number,
     repoKey: string,
     patch: Partial<Omit<RepoTaskRow, "issueNumber" | "repoKey" | "updatedAt">>,
-  ): void {
-    const columns: Record<
-      keyof Omit<RepoTaskRow, "issueNumber" | "repoKey" | "updatedAt">,
-      string
-    > = {
-      scope: "scope",
-      phase: "phase",
-      branch: "branch",
-      resumePhase: "resume_phase",
-      sessionId: "session_id",
-      blockedCommentId: "blocked_comment_id",
-      testAttempts: "test_attempts",
-      reviewIters: "review_iters",
-      prUrl: "pr_url",
-      error: "error",
-      costUsd: "cost_usd",
-      reviewIncomplete: "review_incomplete",
-      prWatchClosed: "pr_watch_closed",
-    };
-    this.patch(
-      "case_repos",
-      columns,
+  ): Promise<void> {
+    await this.request(
+      "PATCH",
+      `/api/support/agent/cases/${issueNumber}/repos/${encodeURIComponent(repoKey)}`,
       patch,
-      ["issue_number = ?", "repo_key = ?"],
-      [issueNumber, repoKey],
     );
   }
 
-  // --- shared patch helper --------------------------------------------------
-
-  private patch(
-    table: string,
-    columns: Record<string, string>,
-    patchObj: Record<string, unknown>,
-    where: string[],
-    whereValues: unknown[],
-  ): void {
-    const sets: string[] = [];
-    const values: unknown[] = [];
-    for (const [key, column] of Object.entries(columns)) {
-      const value = patchObj[key];
-      if (value !== undefined) {
-        sets.push(`${column} = ?`);
-        // better-sqlite3 can't bind booleans — store them as 0/1.
-        values.push(typeof value === "boolean" ? (value ? 1 : 0) : value);
-      }
-    }
-    sets.push("updated_at = ?");
-    values.push(this.now());
-    values.push(...whereValues);
-    this.db
-      .prepare(`UPDATE ${table} SET ${sets.join(", ")} WHERE ${where.join(" AND ")}`)
-      .run(...values);
-  }
-
-  close(): void {
-    this.db.close();
-  }
+  /** No-op — there is no local connection to close. Kept for call-site parity. */
+  close(): void {}
 }
+
+/** Thrown for a 404 so get-style callers can map it to `undefined`. */
+class NotFoundError extends Error {}
