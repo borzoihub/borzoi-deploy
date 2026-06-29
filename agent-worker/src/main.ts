@@ -269,7 +269,33 @@ async function tick(deps: {
     }
   }
 
-  if (actionable.length === 0 && parked.length === 0 && needsHuman.length === 0) {
+  // 3. Watch completed cases' PRs for maintainer follow-up feedback. These issues
+  // are CLOSED, so they are NOT in `open`/`openNumbers` — this pass works off the
+  // journal independently. A case is watchable while it has a DONE sub-task with an
+  // open PR we haven't stopped watching.
+  const withPrFeedback = state
+    .allInPhase("DONE")
+    .filter((c) =>
+      state
+        .getRepoTasks(c.issueNumber)
+        .some((t) => t.phase === "DONE" && t.prUrl && !t.prWatchClosed),
+    );
+  for (const row of withPrFeedback) {
+    console.log(`[${ts()}]   💬 #${row.issueNumber}: checking PR(s) for maintainer feedback…`);
+    try {
+      await pipeline.addressPrFeedbackForCase(github.view(row.issueNumber));
+    } catch (e) {
+      if (e instanceof ShutdownError) throw e;
+      console.error(`[${ts()}]   PR-feedback check failed for #${row.issueNumber}:`, e);
+    }
+  }
+
+  if (
+    actionable.length === 0 &&
+    parked.length === 0 &&
+    needsHuman.length === 0 &&
+    withPrFeedback.length === 0
+  ) {
     console.log(`[${ts()}] tick #${n}: nothing actionable — idle.`);
   } else {
     console.log(

@@ -10,17 +10,20 @@ import {
   ensureWorktree,
   freshWorktree,
   removeWorktree,
+  syncWorktreeToRemoteBranch,
   localBranchExists,
   commitsAhead,
   hasWorktree,
   isWorktreeDirty,
   priorWorkSummary,
+  repoSlug,
   type Repo,
 } from "./repos.js";
 import { triage } from "./triage.js";
-import { implement, verifyTests } from "./implement.js";
+import { implement, addressPrFeedback, verifyTests } from "./implement.js";
 import { review, reviewFix, isBlocking, formatFindings, type ReviewResult } from "./review.js";
-import { openPr, findExistingPr } from "./pr.js";
+import { openPr, findExistingPr, parsePrNumber, pushBranch } from "./pr.js";
+import type { PrComment } from "./github.js";
 import { buildAndLink, packageName, dependsOn } from "./linking.js";
 import { resumeWithAnswerPrompt, type RepoScope } from "./prompts.js";
 
@@ -65,6 +68,21 @@ export function slugify(title: string): string {
       .replace(/^-+|-+$/g, "")
       .slice(0, 50) || "fix"
   );
+}
+
+/**
+ * Whether a PR comment is addressed to the bot — i.e. @-mentions its GitHub
+ * login. A bare mention is the trigger for a follow-up; comments that don't
+ * mention the bot are ordinary review discussion and are left alone. Word-bounded
+ * so `@voltini-bot` doesn't match `@voltini-bot-helper` (a different account).
+ */
+export function mentionsBot(body: string, botLogin: string): boolean {
+  return new RegExp(`@${botLogin}(?![a-zA-Z0-9-])`, "i").test(body);
+}
+
+/** The PR comments that @-mention the bot, from a fetched feedback set. */
+export function feedbackForBot(comments: PrComment[], botLogin: string): PrComment[] {
+  return comments.filter((c) => mentionsBot(c.body, botLogin));
 }
 
 export class Pipeline {
@@ -807,5 +825,164 @@ export class Pipeline {
       this.setPhase(issue.number, "WORKING");
       await this.processCase(issue, this.deps.state.get(issue.number)!);
     }
+  }
+
+  /**
+   * Post-completion PR feedback loop. For a DONE case, watch each opened PR for a
+   * maintainer comment that @-mentions the bot (top-level or inline) and, when one
+   * appears, reopen a session on the PR branch to make the requested change and
+   * push it. The support issue stays CLOSED — this is a developer-side refinement,
+   * not a re-investigation, so the customer is not re-notified.
+   *
+   * Idempotency mirrors `/retry`: the bot 👀-reacts to a comment when it acts, and
+   * skips comments it has already reacted to. We react FIRST (before the work), so
+   * a crash mid-session needs a human rather than re-spending budget and
+   * re-pushing every tick.
+   */
+  async addressPrFeedbackForCase(issue: IssueDetail): Promise<void> {
+    const watchable = this.deps.state
+      .getRepoTasks(issue.number)
+      .filter((t) => t.phase === "DONE" && t.prUrl && !t.prWatchClosed);
+    for (const task of watchable) {
+      try {
+        await this.addressPrFeedbackForRepo(issue, task);
+      } catch (e) {
+        if (e instanceof ShutdownError) throw e;
+        // A PR-feedback failure must never sink the worker or the case — it's
+        // already resolved. Log and carry on; the comment stays un-reacted only
+        // if we failed before reacting, so it'll be retried next tick.
+        console.error(`[pr-feedback] #${issue.number} (${task.repoKey}) failed:`, e);
+      }
+    }
+  }
+
+  /** Handle one PR's outstanding maintainer @-mentions. */
+  private async addressPrFeedbackForRepo(issue: IssueDetail, task: RepoTaskRow): Promise<void> {
+    const repo = findRepo(this.deps.config.reposDir, task.repoKey);
+    if (!repo || !task.prUrl || !task.branch) return;
+    const slug = repoSlug(repo);
+    if (!slug) return;
+    const prNumber = parsePrNumber(task.prUrl);
+
+    const { state, comments } = this.deps.github.prFeedback(slug, prNumber);
+
+    // Outstanding = mentions the bot, from an authorized maintainer on THIS code
+    // repo, that we haven't already reacted to.
+    const outstanding = feedbackForBot(comments, this.deps.config.botLogin).filter(
+      (c) =>
+        c.id &&
+        this.deps.github.isAuthorizedMaintainer(c.author, slug) &&
+        !this.deps.github.hasBotReacted(c.id),
+    );
+
+    // A merged/closed PR can no longer be amended — tell the maintainer (once) and
+    // stop watching this PR for good.
+    if (state !== "open") {
+      if (outstanding.length > 0) {
+        for (const c of outstanding) this.deps.github.acknowledgeCommand(c.id);
+        this.deps.github.replyOnPr(
+          slug,
+          prNumber,
+          "🤖 I can't amend this PR because it's already " +
+            `${state}. Please open a new support issue for any further change.`,
+        );
+      }
+      this.setRepoPhase(issue.number, task.repoKey, task.phase, { prWatchClosed: true });
+      return;
+    }
+
+    if (outstanding.length === 0) return;
+
+    this.narrate(
+      issue.number,
+      `PR feedback on "${task.repoKey}" (${task.prUrl}): addressing ${outstanding.length} maintainer comment(s).`,
+    );
+    // React FIRST so the same comments are never acted on twice.
+    for (const c of outstanding) this.deps.github.acknowledgeCommand(c.id);
+
+    // A follow-up is an explicit maintainer request — give it a fresh budget
+    // envelope, exactly like /retry (lifetime cost is preserved by addCost).
+    this.deps.state.update(issue.number, { costUsd: 0 });
+
+    const base = defaultBranch(repo);
+    const scope = this.scopeFor(issue.number, task);
+    // Reopen the PR branch at its remote tip (the worktree was reclaimed on close).
+    const worktree = syncWorktreeToRemoteBranch(repo, task.branch);
+
+    let attempts = 0;
+    let pushed = false;
+    let lastSummary = "";
+    while (attempts < this.deps.config.maxTestAttempts) {
+      attempts++;
+      const budget = this.budgetRemaining(issue.number);
+      if (budget < MIN_SESSION_BUDGET_USD) {
+        this.deps.github.replyOnPr(
+          slug,
+          prNumber,
+          `🤖 I started on this feedback but hit the $${this.deps.config.maxBudgetPerCaseUsd.toFixed(0)} ` +
+            "per-case budget before finishing. Leaving it for a maintainer.",
+        );
+        break;
+      }
+      const result = await addressPrFeedback(
+        this.deps.runner,
+        this.deps.config,
+        issue,
+        worktree,
+        budget,
+        outstanding,
+        scope,
+      );
+      this.charge(issue.number, task.repoKey, result.costUsd, `pr-feedback (${task.repoKey})`);
+      if (result.limitHit || result.isError) {
+        this.deps.github.replyOnPr(
+          slug,
+          prNumber,
+          "🤖 I couldn't complete this feedback automatically " +
+            `(${result.limitHit ? "ran out of budget" : "the session errored"}). Leaving it for a maintainer.`,
+        );
+        break;
+      }
+      lastSummary = result.text.trim();
+
+      const verdict = await verifyTests(this.deps.runner, worktree, this.budgetRemaining(issue.number));
+      this.charge(issue.number, task.repoKey, verdict.costUsd, `pr-feedback-test (${task.repoKey})`);
+      if (verdict.passed) {
+        pushBranch(this.deps.config, worktree, task.branch);
+        pushed = true;
+        break;
+      }
+      this.narrate(
+        issue.number,
+        `PR-feedback tests for "${task.repoKey}" failed (attempt ${attempts}/${this.deps.config.maxTestAttempts}): ${verdict.summary}`,
+      );
+      if (verdict.limitHit) {
+        this.deps.github.replyOnPr(
+          slug,
+          prNumber,
+          "🤖 I made the change but couldn't confirm the tests within budget. Leaving it for a maintainer.",
+        );
+        break;
+      }
+    }
+
+    if (pushed) {
+      this.deps.github.replyOnPr(
+        slug,
+        prNumber,
+        `🤖 Done — pushed an update to this PR addressing the feedback.${lastSummary ? `\n\n${lastSummary}` : ""}`,
+      );
+      this.narrate(issue.number, `PR feedback on "${task.repoKey}" addressed and pushed.`);
+    } else if (attempts >= this.deps.config.maxTestAttempts) {
+      this.deps.github.replyOnPr(
+        slug,
+        prNumber,
+        `🤖 I attempted the requested change but couldn't get the tests passing after ` +
+          `${attempts} attempts. Leaving it for a maintainer.`,
+      );
+    }
+
+    // Reclaim the worktree disk; the branch (and PR) live on.
+    removeWorktree(repo, task.branch);
   }
 }

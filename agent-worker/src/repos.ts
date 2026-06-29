@@ -178,6 +178,24 @@ export function ensureWorktree(repo: Repo, branch: string, base: string): string
 }
 
 /**
+ * A worktree synced to the tip of an EXISTING remote branch (origin/<branch>).
+ *
+ * Used to reopen work on a PR's branch after the case completed — e.g. to address
+ * post-merge-review PR feedback. Unlike `freshWorktree` (which resets to
+ * origin/<base> and would throw away the PR's commits), this fetches the PR
+ * branch and hard-resets the worktree to it, so the session builds on exactly
+ * what the open PR contains. The hard reset also discards any leftover local
+ * commits from a crashed prior feedback round, keeping rounds idempotent: the
+ * remote PR branch is the single source of truth.
+ */
+export function syncWorktreeToRemoteBranch(repo: Repo, branch: string): string {
+  const path = ensureWorktree(repo, branch, branch);
+  git(repo.path, ["fetch", "origin", branch]);
+  git(path, ["reset", "--hard", `origin/${branch}`]);
+  return path;
+}
+
+/**
  * A guaranteed-clean worktree off origin/<base> — removes any stale worktree
  * and branch first. Used when starting fresh work, so a half-finished previous
  * attempt can't silently contaminate a new run. (For RESUMING prior work, use

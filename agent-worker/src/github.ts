@@ -45,6 +45,33 @@ export interface IssueComment {
   createdAt: string;
 }
 
+/**
+ * A comment on a pull request — either a top-level conversation comment or an
+ * inline review comment on a specific diff line. `id` is the GraphQL node id
+ * (used for the 👀 reaction marker). Inline comments additionally carry the file
+ * and line they were left on so a follow-up session can locate the exact spot.
+ */
+export interface PrComment {
+  id: string;
+  author: string;
+  body: string;
+  /** "inline" (on a diff line) or "conversation" (top-level PR thread). */
+  kind: "inline" | "conversation";
+  /** File path (inline comments only). */
+  path?: string;
+  /** Line number in the file (inline comments only). */
+  line?: number;
+  /** The diff hunk GitHub attaches to an inline comment, for context. */
+  diffHunk?: string;
+}
+
+export interface PrFeedback {
+  /** Lowercased PR state: "open" | "merged" | "closed". */
+  state: string;
+  /** Every human (non-bot) comment on the PR, conversation + inline. */
+  comments: PrComment[];
+}
+
 export interface IssueDetail extends IssueSummary {
   body: string;
   comments: IssueComment[];
@@ -305,16 +332,21 @@ export class GitHub {
    * collaborator) can't pass it. Org membership is deliberately NOT used: a
    * private member reads as a 404 and the membership endpoint is often 403 to a
    * PAT, so it would wrongly deny real maintainers.
+   *
+   * `repoSlug` selects which repo's collaborator list to check: the support repo
+   * for `/retry` (the default), or a code repo for PR-feedback follow-ups (the
+   * PR lives there, so write access there is what authorises an amend).
    */
-  isAuthorizedMaintainer(login: string): boolean {
+  isAuthorizedMaintainer(login: string, repoSlug: string = this.config.supportRepo): boolean {
     if (!login || login === this.config.botLogin) return false;
-    const cached = this.maintainerCache.get(login);
+    const cacheKey = `${repoSlug}:${login}`;
+    const cached = this.maintainerCache.get(cacheKey);
     if (cached !== undefined) return cached;
     let authorized = false;
     try {
       const role = this.gh([
         "api",
-        `repos/${this.config.supportRepo}/collaborators/${login}/permission`,
+        `repos/${repoSlug}/collaborators/${login}/permission`,
         "-q",
         ".role_name",
       ]);
@@ -322,7 +354,7 @@ export class GitHub {
     } catch {
       authorized = false; // not a collaborator / no access → deny
     }
-    this.maintainerCache.set(login, authorized);
+    this.maintainerCache.set(cacheKey, authorized);
     return authorized;
   }
 
@@ -353,20 +385,30 @@ export class GitHub {
       if (!c.author || c.author === this.config.botLogin) continue;
       if (!c.body.toLowerCase().includes(cmd)) continue;
       if (!this.isAuthorizedMaintainer(c.author)) continue;
-      if (this.botReactedTo(c.id)) continue; // already handled
+      if (this.hasBotReacted(c.id)) continue; // already handled
       return c;
     }
     return undefined;
   }
 
-  /** Whether the bot (the token's own user) has already reacted to a comment. */
-  private botReactedTo(commentNodeId: string): boolean {
+  /**
+   * Whether the bot (the token's own user) has already reacted to a comment.
+   *
+   * The node id may be an `IssueComment` (issue/PR-conversation comment) OR a
+   * `PullRequestReviewComment` (inline diff comment) — both support reactions but
+   * are distinct GraphQL types, so the query must spread over BOTH. Querying only
+   * `IssueComment` would return no reaction groups for an inline comment and the
+   * caller would re-handle it on every tick.
+   */
+  hasBotReacted(commentNodeId: string): boolean {
     try {
       const out = this.gh([
         "api",
         "graphql",
         "-f",
-        "query=query($id:ID!){node(id:$id){... on IssueComment{reactionGroups{viewerHasReacted}}}}",
+        "query=query($id:ID!){node(id:$id){" +
+          "... on IssueComment{reactionGroups{viewerHasReacted}}" +
+          "... on PullRequestReviewComment{reactionGroups{viewerHasReacted}}}}",
         "-f",
         `id=${commentNodeId}`,
       ]);
@@ -399,6 +441,85 @@ export class GitHub {
     } catch (e) {
       console.warn(`[github] could not react to comment ${commentNodeId}:`, String(e));
     }
+  }
+
+  /**
+   * Fetch a pull request's state plus every human comment on it — both top-level
+   * conversation comments and inline review comments on the diff. Targets the
+   * CODE repo the PR lives in (`repoSlug`), not the support repo. The bot's own
+   * comments are filtered out so its replies can never re-trigger a follow-up.
+   *
+   * Two reads: `gh pr view` for state + conversation comments, and the REST
+   * pulls/{n}/comments endpoint for inline review comments (which `gh pr view`
+   * does not return). Each comment's `id` is the GraphQL node id used for the 👀
+   * reaction marker — REST exposes it as `node_id`.
+   */
+  prFeedback(repoSlug: string, prNumber: number): PrFeedback {
+    const viewOut = this.gh([
+      "pr",
+      "view",
+      String(prNumber),
+      "-R",
+      repoSlug,
+      "--json",
+      "state,comments",
+    ]);
+    const view = JSON.parse(viewOut) as {
+      state: string;
+      comments: Array<{ id?: string; author: { login: string }; body: string }>;
+    };
+
+    const conversation: PrComment[] = (view.comments ?? [])
+      .filter((c) => c.author?.login && c.author.login !== this.config.botLogin)
+      .map((c) => ({
+        id: c.id ?? "",
+        author: c.author.login,
+        body: c.body ?? "",
+        kind: "conversation" as const,
+      }));
+
+    let inline: PrComment[] = [];
+    try {
+      const apiOut = this.gh([
+        "api",
+        `repos/${repoSlug}/pulls/${prNumber}/comments`,
+        "--paginate",
+      ]);
+      const raw = JSON.parse(apiOut) as Array<{
+        node_id?: string;
+        user: { login: string };
+        body: string;
+        path?: string;
+        line?: number | null;
+        original_line?: number | null;
+        diff_hunk?: string;
+      }>;
+      inline = raw
+        .filter((c) => c.user?.login && c.user.login !== this.config.botLogin)
+        .map((c) => ({
+          id: c.node_id ?? "",
+          author: c.user.login,
+          body: c.body ?? "",
+          kind: "inline" as const,
+          path: c.path,
+          line: c.line ?? c.original_line ?? undefined,
+          diffHunk: c.diff_hunk,
+        }));
+    } catch (e) {
+      // Don't let an inline-comments fetch failure (e.g. token lacks access to
+      // the code repo's PR API) drop the conversation comments we did read.
+      console.warn(`[github] could not fetch inline review comments for ${repoSlug}#${prNumber}:`, String(e));
+    }
+
+    return {
+      state: String(view.state ?? "").toLowerCase(),
+      comments: [...conversation, ...inline],
+    };
+  }
+
+  /** Post a top-level comment on a pull request in the given CODE repo. */
+  replyOnPr(repoSlug: string, prNumber: number, body: string): void {
+    this.ghMutate(["pr", "comment", String(prNumber), "-R", repoSlug, "--body", body]);
   }
 
   /** Ensure the needs-human label exists in the repo (idempotent). */

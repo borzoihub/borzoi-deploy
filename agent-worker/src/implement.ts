@@ -1,10 +1,12 @@
 import { z } from "zod";
 import type { ClaudeRunner, RunResult } from "./claude.js";
 import type { Config } from "./config.js";
-import type { IssueDetail } from "./github.js";
+import type { IssueDetail, PrComment } from "./github.js";
 import {
   implementSystemPrompt,
   implementPrompt,
+  prFeedbackSystemPrompt,
+  prFeedbackPrompt,
   verifyTestsSystemPrompt,
   verifyTestsPrompt,
   type RepoScope,
@@ -57,6 +59,33 @@ export async function implement(
     maxTurns: config.maxImplementTurns,
     maxBudgetUsd: budgetUsd,
     enableAskHuman: true,
+  });
+}
+
+/**
+ * Address maintainer feedback on an already-open PR, inside a worktree synced to
+ * the PR's branch. Mirrors `implement` but for a post-completion follow-up: it
+ * makes the smallest change satisfying the feedback, updates tests, and commits.
+ * `ask_human` is intentionally DISABLED — there is no open issue thread to park a
+ * question on, and the maintainer reviewing the PR is the human in the loop.
+ */
+export async function addressPrFeedback(
+  runner: ClaudeRunner,
+  config: Config,
+  issue: IssueDetail,
+  worktreePath: string,
+  budgetUsd: number,
+  feedback: PrComment[],
+  scope?: RepoScope,
+): Promise<RunResult> {
+  return runner.run({
+    label: `pr-feedback #${issue.number}${scope ? ` (${scope.repoKey})` : ""}`,
+    cwd: worktreePath,
+    systemPrompt: prFeedbackSystemPrompt(issue, scope, feedback),
+    prompt: prFeedbackPrompt(),
+    maxTurns: config.maxImplementTurns,
+    maxBudgetUsd: budgetUsd,
+    enableAskHuman: false,
   });
 }
 

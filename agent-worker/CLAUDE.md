@@ -104,6 +104,28 @@ issue comment and parks the case (BLOCKED). Each poll tick checks BLOCKED cases
 for a reply by a non-bot author after the question comment, then resumes the
 saved Agent SDK session with the answer.
 
+### Post-completion PR feedback
+
+After a case is DONE, each tick also watches its opened PR(s) for a maintainer
+comment that **@-mentions the bot** (`BOT_GH_LOGIN`) — top-level *or* inline on
+the diff. On finding one, the bot reopens a session on the PR branch
+(`syncWorktreeToRemoteBranch`), makes the requested change, runs tests, pushes to
+the **existing** PR branch, and replies on the PR. The support issue stays
+**closed** — this is a developer-side refinement, so the customer is not
+re-notified. Gates and safety:
+
+- **Trigger** is the @-mention; ordinary review chatter is ignored.
+- **Authorization:** write/maintain/admin on the *code repo where the PR lives*
+  (`isAuthorizedMaintainer(login, codeRepoSlug)`) — customers can't trigger it.
+- **Idempotency** is the same 👀-reaction marker as `/retry`; the bot reacts
+  FIRST, then acts, so a mid-session crash needs a human rather than re-spending.
+- **Fresh budget envelope** per feedback round (resets `cost_usd`, keeps
+  `lifetime_cost_usd`), exactly like `/retry`.
+- A merged/closed PR can't be amended: the bot replies saying so and sets the
+  per-sub-task `pr_watch_closed` flag to stop polling that PR forever.
+- The 5-perspective review is skipped for follow-ups (the maintainer is the
+  reviewer); tests still gate the push.
+
 ---
 
 ## Module map (`src/`)
@@ -112,15 +134,15 @@ saved Agent SDK session with the answer.
 | --- | --- |
 | `main.ts` | Startup (config, gh auth, labels, journal↔GitHub reconcile) + the poll loop. |
 | `config.ts` | Strict env loading; throws on any missing required value. |
-| `github.ts` | `gh` CLI wrapper, status derivation, comment polling. |
-| `repos.ts` | Discover pre-cloned repos in `REPOS_DIR`; git worktree create/remove. |
+| `github.ts` | `gh` CLI wrapper, status derivation, issue + PR comment polling, reactions. |
+| `repos.ts` | Discover pre-cloned repos in `REPOS_DIR`; git worktree create/remove/sync. |
 | `state.ts` | SQLite resume journal (one row per issue). |
 | `claude.ts` | Agent SDK `query()` wrapper (cwd, model, bypass, resume, structured output). |
 | `askHuman.ts` | The `ask_human` MCP tool + parked-state signalling. |
 | `triage.ts` | Triage session → `{ fixable, repoKey, reason }`. |
-| `implement.ts` | Implement session + independent test-verify session. |
+| `implement.ts` | Implement session + independent test-verify + PR-feedback session. |
 | `review.ts` | Adapted `!perfect-review` (5 perspectives) + the fix session. |
-| `pr.ts` | `git push` + `gh pr create`. |
+| `pr.ts` | `git push` + `gh pr create`; PR-url parsing + branch push for follow-ups. |
 | `pipeline.ts` | The per-case state machine; all customer-facing gates live here. |
 | `prompts.ts` | Every prompt the bot uses, in one reviewable place. |
 

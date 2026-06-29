@@ -50,6 +50,23 @@ export function findExistingPr(config: Config, repo: Repo, branch: string): Exis
   return undefined;
 }
 
+/**
+ * Extract the PR number from a pull-request URL, e.g.
+ * `https://github.com/owner/repo/pull/42` → 42. Throws on a URL that doesn't
+ * carry a `/pull/<n>` segment — a stored prUrl that can't be parsed is a bug we
+ * want surfaced, not silently treated as "no PR".
+ */
+export function parsePrNumber(prUrl: string): number {
+  const m = prUrl.match(/\/pull\/(\d+)/);
+  if (!m) throw new Error(`Cannot parse a PR number from URL: ${prUrl}`);
+  return Number(m[1]);
+}
+
+/** Push the branch's current tip to origin (updates an already-open PR). */
+export function pushBranch(config: Config, worktreePath: string, branch: string): void {
+  run("git", ["push", "origin", branch], worktreePath, config);
+}
+
 function run(cmd: string, args: string[], cwd: string, config: Config): string {
   return execFileSync(cmd, args, {
     cwd,

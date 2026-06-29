@@ -1,4 +1,4 @@
-import type { IssueDetail } from "./github.js";
+import type { IssueDetail, PrComment } from "./github.js";
 
 /**
  * Prompt builders for the agent sessions. Kept together so the wording the bot
@@ -149,6 +149,56 @@ export function verifyTestsSystemPrompt(): string {
 
 export function verifyTestsPrompt(): string {
   return "Run the repository's test suite and report whether it passes.";
+}
+
+/** Render one PR feedback comment for the agent, with file/line context if inline. */
+function feedbackItem(c: PrComment): string {
+  const where =
+    c.kind === "inline" && c.path
+      ? ` (inline on \`${c.path}\`${c.line ? `:${c.line}` : ""})`
+      : " (PR comment)";
+  const hunk = c.kind === "inline" && c.diffHunk ? `\n  diff context:\n${c.diffHunk}` : "";
+  return `- @${c.author}${where}: ${c.body}${hunk}`;
+}
+
+export function prFeedbackSystemPrompt(
+  issue: IssueDetail,
+  scope: RepoScope | undefined,
+  feedback: PrComment[],
+): string {
+  const scopeText = scope ? scopeBlock(scope) : "";
+  return [
+    "You are a senior engineer addressing maintainer feedback on an ALREADY-OPEN pull request",
+    "for a Voltini support-case fix. You are working inside a git worktree checked out to the PR's",
+    "branch (it already contains the original fix). Follow the repo's CLAUDE.md and CODING_STYLE.md conventions.",
+    "",
+    "A maintainer reviewed the PR and left the feedback below. Address EVERY item with the smallest,",
+    "most conservative change that satisfies it — do not refactor or expand scope. This is a follow-up",
+    "tweak on shipped work, not a rewrite.",
+    "",
+    "No human is available to answer questions in real time. If a request is ambiguous, make the",
+    "smallest sensible change and note the assumption in your final summary — the maintainer is",
+    "watching the PR and can comment again if needed. Do NOT ask for confirmation.",
+    "",
+    ...(scopeText ? [scopeText, ""] : []),
+    "Your task:",
+    "1. Make the requested change(s) to the code.",
+    "2. Update or add unit tests if the change affects behaviour; keep existing tests green.",
+    "3. Run the repo's test suite and make it pass.",
+    "4. Commit your work with a clear message referencing the issue number.",
+    "Do NOT push and do NOT open a new pull request — the orchestrator pushes to the existing PR branch.",
+    "End with a one-paragraph summary of exactly what you changed (and any assumptions).",
+    "",
+    "--- Maintainer feedback to address ---",
+    feedback.map(feedbackItem).join("\n"),
+    "--- end feedback ---",
+    "",
+    issueContext(issue),
+  ].join("\n");
+}
+
+export function prFeedbackPrompt(): string {
+  return "Address the maintainer's PR feedback now, end to end. Commit when the tests pass.";
 }
 
 export function reviewSystemPrompt(): string {

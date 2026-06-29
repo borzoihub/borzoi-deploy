@@ -1,5 +1,6 @@
 import { expect } from "chai";
-import { slugify } from "../pipeline.js";
+import { slugify, mentionsBot, feedbackForBot } from "../pipeline.js";
+import type { PrComment } from "../github.js";
 
 describe("slugify", () => {
   it("produces a branch-safe slug from a case title", () => {
@@ -19,5 +20,49 @@ describe("slugify", () => {
 
   it("falls back to 'fix' when the title has no usable characters", () => {
     expect(slugify("!!! ???")).to.equal("fix");
+  });
+});
+
+describe("mentionsBot", () => {
+  const bot = "voltini-bot";
+
+  it("matches a plain @-mention", () => {
+    expect(mentionsBot("hey @voltini-bot please fix the wording", bot)).to.equal(true);
+  });
+
+  it("is case-insensitive", () => {
+    expect(mentionsBot("@Voltini-Bot fix this", bot)).to.equal(true);
+  });
+
+  it("ignores a comment without the mention", () => {
+    expect(mentionsBot("the wording here is wrong", bot)).to.equal(false);
+  });
+
+  it("does not match a longer login that the bot name is a prefix of", () => {
+    expect(mentionsBot("ping @voltini-bot-helper instead", bot)).to.equal(false);
+  });
+});
+
+describe("feedbackForBot", () => {
+  const bot = "voltini-bot";
+  const make = (id: string, body: string, kind: PrComment["kind"] = "conversation"): PrComment => ({
+    id,
+    author: "maintainer",
+    body,
+    kind,
+  });
+
+  it("keeps only the comments that @-mention the bot", () => {
+    const comments = [
+      make("a", "@voltini-bot tweak the label"),
+      make("b", "looks good to me"),
+      make("c", "@voltini-bot also rename this var", "inline"),
+    ];
+    const picked = feedbackForBot(comments, bot);
+    expect(picked.map((c) => c.id)).to.deep.equal(["a", "c"]);
+  });
+
+  it("returns an empty array when nothing mentions the bot", () => {
+    expect(feedbackForBot([make("a", "nice work")], bot)).to.deep.equal([]);
   });
 });

@@ -91,6 +91,14 @@ export interface RepoTaskRow {
    * comment is annotated so a human knows the automated review was incomplete.
    */
   reviewIncomplete: boolean;
+  /**
+   * Stop watching this sub-task's PR for follow-up feedback. Set once the PR is
+   * observed merged/closed (it can no longer be amended), so the post-completion
+   * PR-feedback poll doesn't re-query a dead PR every tick forever. The 👀
+   * reaction marker handles per-comment idempotency; this bounds WHICH PRs are
+   * still worth polling at all.
+   */
+  prWatchClosed: boolean;
   updatedAt: string;
 }
 
@@ -121,6 +129,7 @@ interface RawRepoTask {
   error: string | null;
   cost_usd: number;
   review_incomplete: number;
+  pr_watch_closed: number;
   updated_at: string;
 }
 
@@ -154,6 +163,7 @@ function toRepoTaskRow(raw: RawRepoTask): RepoTaskRow {
     error: raw.error,
     costUsd: raw.cost_usd ?? 0,
     reviewIncomplete: (raw.review_incomplete ?? 0) === 1,
+    prWatchClosed: (raw.pr_watch_closed ?? 0) === 1,
     updatedAt: raw.updated_at,
   };
 }
@@ -191,6 +201,7 @@ export class StateStore {
         error              TEXT,
         cost_usd           REAL NOT NULL DEFAULT 0,
         review_incomplete  INTEGER NOT NULL DEFAULT 0,
+        pr_watch_closed    INTEGER NOT NULL DEFAULT 0,
         updated_at         TEXT NOT NULL,
         PRIMARY KEY (issue_number, repo_key)
       );
@@ -211,6 +222,7 @@ export class StateStore {
       ["cases", "needs_human_comment_id TEXT"],
       ["case_repos", "cost_usd REAL NOT NULL DEFAULT 0"],
       ["case_repos", "review_incomplete INTEGER NOT NULL DEFAULT 0"],
+      ["case_repos", "pr_watch_closed INTEGER NOT NULL DEFAULT 0"],
     ];
     for (const [table, column] of additions) {
       try {
@@ -354,6 +366,7 @@ export class StateStore {
       error: "error",
       costUsd: "cost_usd",
       reviewIncomplete: "review_incomplete",
+      prWatchClosed: "pr_watch_closed",
     };
     this.patch(
       "case_repos",
