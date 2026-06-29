@@ -2,7 +2,8 @@ import { execFileSync } from "node:child_process";
 import { existsSync, statSync } from "node:fs";
 import { DateHelper } from "@digistrada/theworks-common";
 import { loadConfig, type Config } from "./config.js";
-import { GitHub, LABEL_IN_PROGRESS, LABEL_NEEDS_HUMAN, LABEL_WONTFIX } from "./github.js";
+import { GitHub } from "./github.js";
+import { phaseFromGitHub } from "./githubPhase.js";
 import { StateStore, type Phase, type RepoTaskRow } from "./state.js";
 import { ClaudeRunner, ShutdownError } from "./claude.js";
 import { Pipeline } from "./pipeline.js";
@@ -116,38 +117,6 @@ async function describeTicket(state: StateStore, issueNumber: number): Promise<s
       return repos.map((t) => `${t.repoKey} — ${describeRepoTask(t)}`).join("; ");
     }
   }
-}
-
-/**
- * Map GitHub's true state to the journal's case phase. GitHub (open/closed +
- * labels) is the real source of truth; the journal is a resume
- * cache that can drift — e.g. a human relabels/reopens an issue directly, or a
- * crash leaves the cache mid-phase. Reconciliation rewrites the cached phase to
- * whatever GitHub now says.
- *
- * Two phases are NOT representable on GitHub and are preserved when GitHub still
- * agrees the case is open + in-progress:
- *  - BLOCKED carries the Agent SDK sessionId needed to resume a parked question;
- *    on GitHub it looks identical to ordinary in-progress work.
- *  - NEEDS_HUMAN is an open issue wearing the needs-human label.
- */
-function phaseFromGitHub(
-  gh: { state: "open" | "closed"; labels: string[] },
-  current: Phase,
-): Phase {
-  const set = new Set(gh.labels.map((l) => l.toLowerCase()));
-  if (gh.state === "closed") {
-    // A won't-fix close always carries the wontfix label (closeWontFix);
-    // anything else closed is a resolved (or human "completed") close.
-    return set.has(LABEL_WONTFIX) || set.has("duplicate") ? "WONTFIX" : "DONE";
-  }
-  if (set.has(LABEL_NEEDS_HUMAN)) return "NEEDS_HUMAN";
-  if (set.has(LABEL_IN_PROGRESS)) {
-    // in-progress can't distinguish active work from a parked Q&A — keep BLOCKED
-    // so its sessionId survives the restart.
-    return current === "BLOCKED" ? "BLOCKED" : "WORKING";
-  }
-  return "NEW";
 }
 
 /**

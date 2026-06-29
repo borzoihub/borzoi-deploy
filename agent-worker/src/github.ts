@@ -132,14 +132,26 @@ export class GitHub {
 
   /** Open support cases, oldest first. */
   listOpen(): IssueSummary[] {
+    return this.listByState("open");
+  }
+
+  /**
+   * Every support case (open + closed), oldest first. Used by the one-shot
+   * backfill to seed central from existing GitHub history.
+   */
+  listAll(limit = 1000): IssueSummary[] {
+    return this.listByState("all", limit);
+  }
+
+  private listByState(state: "open" | "all", limit = 100): IssueSummary[] {
     const out = this.gh([
       "issue",
       "list",
       ...this.repoArgs(),
       "--state",
-      "open",
+      state,
       "--limit",
-      "100",
+      String(limit),
       "--json",
       "number,title,labels,state",
     ]);

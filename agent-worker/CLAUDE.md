@@ -224,6 +224,11 @@ every tick until the repo is cloned** — it self-heals rather than parking.
 
 - `npm start` — run the worker (via tsx).
 - `npm run dev` — run with tsx watch.
+- `npm run backfill` — one-shot: seed central from existing GitHub history
+  (case phases + PR links for every open/closed support issue). Run once when
+  switching to central state. Cost/solution are NOT recoverable for historical
+  cases (they only lived in the discarded local SQLite) — they show $0/empty and
+  are captured in full for new work. See `src/backfill.ts`.
 - `npm test` — mocha + chai unit tests (`src/tests/**/*.spec.ts`).
 - `npm run typecheck` — `tsc --noEmit`.
 
