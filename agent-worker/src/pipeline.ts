@@ -1,6 +1,6 @@
 import type { Config } from "./config.js";
 import type { GitHub, IssueDetail } from "./github.js";
-import { LABEL_IN_PROGRESS, LABEL_NEEDS_HUMAN, RETRY_COMMAND } from "./github.js";
+import { LABEL_IN_PROGRESS, LABEL_NEEDS_HUMAN, LABEL_WONTFIX, RETRY_COMMAND } from "./github.js";
 import type { StateStore, CaseRow, RepoTaskRow, RepoPhase } from "./state.js";
 import { ShutdownError, type ClaudeRunner, type RunResult } from "./claude.js";
 import {
@@ -233,6 +233,72 @@ export class Pipeline {
     await this.processCase(issue, (await this.deps.state.get(issue.number))!);
   }
 
+  /**
+   * Re-arm a terminal case (won't-fix or needs-human) when an authorized
+   * maintainer @-mentions the bot on the ISSUE itself — the issue-side equivalent
+   * of the post-completion PR-feedback loop, and the natural way to override a
+   * won't-fix close. A won't-fix reflects the bot's OWN judgement that the case
+   * isn't actionable; a maintainer outranks that, so an @-mention reopens the
+   * issue, gives it a fresh budget envelope, and re-runs it — passing the
+   * maintainer's instruction to triage as an authoritative directive so it
+   * investigates instead of re-closing. No-op unless a qualifying mention is
+   * present.
+   *
+   * Authorization + idempotency mirror `/retry`: the author must have write access
+   * to the support repo (customers never do), and the bot 👀-reacts FIRST so a
+   * single mention fires exactly once across ticks/restarts. The scan is anchored
+   * to after the bot's close/hand-off comment.
+   */
+  async rearmOnIssueMention(issue: IssueDetail, row: CaseRow): Promise<void> {
+    // Re-read: an earlier pass this tick (e.g. /retry) may already have moved the
+    // case out of a terminal phase, making the passed-in snapshot stale.
+    const current = await this.deps.state.get(issue.number);
+    if (!current || (current.phase !== "WONTFIX" && current.phase !== "NEEDS_HUMAN")) return;
+
+    const cmd = this.deps.github.findUnhandledMention(issue.number, current.needsHumanCommentId);
+    if (!cmd) return;
+
+    // React FIRST (👀): the durable idempotency marker AND a visible "picked it up"
+    // signal, so this exact mention is never acted on twice.
+    this.deps.github.acknowledgeCommand(cmd.id);
+    this.narrate(
+      issue.number,
+      `Maintainer @${cmd.author} @-mentioned me to look again — re-arming with a fresh $${this.deps.config.maxBudgetPerCaseUsd.toFixed(0)} budget.`,
+    );
+
+    // A won't-fix case is CLOSED — reopen it (and drop the wontfix label) so the
+    // customer-visible state reflects that it's being worked again. A needs-human
+    // case is already open, so these are no-ops there.
+    if (issue.state === "closed") this.deps.github.reopenIssue(issue.number);
+    this.deps.github.removeLabel(issue.number, LABEL_WONTFIX);
+    this.deps.github.removeLabel(issue.number, LABEL_NEEDS_HUMAN);
+    this.deps.github.removeLabel(issue.number, LABEL_IN_PROGRESS);
+
+    // Fresh attempt budget (lifetime total kept by addCost's separate column).
+    await this.deps.state.update(issue.number, { costUsd: 0, error: null, needsHumanCommentId: null });
+    // Un-stick every sub-task that had given up (relevant for a needs-human re-run;
+    // a won't-fix case has none). recoverExistingWork then upgrades any with
+    // committed/tested work straight back to TEST instead of redoing it.
+    for (const t of await this.deps.state.getRepoTasks(issue.number)) {
+      if (t.phase === "NEEDS_HUMAN") {
+        await this.deps.state.updateRepoTask(issue.number, t.repoKey, {
+          phase: "BRANCH",
+          error: null,
+          reviewIncomplete: false,
+          testAttempts: 0,
+          reviewIters: 0,
+        });
+      }
+    }
+    await this.setPhase(issue.number, "NEW");
+    this.deps.github.comment(issue.number, `🤖 Taking another look at this (requested by @${cmd.author}).`);
+
+    // Re-fetch the (now reopened) issue, and drive it with the maintainer's comment
+    // as the triage override so a previously won't-fixed case is investigated.
+    const reopened = this.deps.github.view(issue.number);
+    await this.processCase(reopened, (await this.deps.state.get(issue.number))!, cmd.body);
+  }
+
   /** Park ONE repo sub-task on a human question; the case is BLOCKED overall. */
   private async parkRepo(issue: IssueDetail, task: RepoTaskRow, resumePhase: RepoPhase, result: RunResult): Promise<void> {
     const question = result.question ?? "I'm blocked but didn't record a question.";
@@ -273,15 +339,20 @@ export class Pipeline {
     await this.setRepoPhase(issue.number, task.repoKey, "PR", { reviewIncomplete: true });
   }
 
-  /** Advance a case as far as possible this invocation. */
-  async processCase(issue: IssueDetail, row: CaseRow): Promise<void> {
+  /**
+   * Advance a case as far as possible this invocation. `triageOverride`, when
+   * present, is a maintainer's authoritative instruction (from an @-mention re-arm)
+   * handed to triage so a previously not-actionable case is investigated rather
+   * than re-closed won't-fix.
+   */
+  async processCase(issue: IssueDetail, row: CaseRow, triageOverride?: string): Promise<void> {
     if (row.phase === "NEW") {
       // First, recover any work a previous (possibly crashed, or pre-journal-wipe)
       // attempt left behind — an open PR or a branch with commits — so we never
       // start over on a case that's already done or half-done.
       const recovered = await this.recoverExistingWork(issue);
       if (!recovered) {
-        const planned = await this.triageAndPlan(issue);
+        const planned = await this.triageAndPlan(issue, triageOverride);
         if (!planned) return; // terminal (wontfix / needs-human) already handled
       }
     }
@@ -371,11 +442,18 @@ export class Pipeline {
    * NEW → triage. Records a sub-task per repo the fix must touch, or terminates
    * the case (won't-fix / needs-human). Returns false if it terminated.
    */
-  private async triageAndPlan(issue: IssueDetail): Promise<boolean> {
+  private async triageAndPlan(issue: IssueDetail, override?: string): Promise<boolean> {
     this.narrate(issue.number, `Investigating "${issue.title}"…`);
     const reposDir = this.deps.config.reposDir;
     const available = discoverRepos(reposDir).map((r) => r.key);
-    const result = await triage(this.deps.runner, reposDir, available, issue, await this.budgetRemaining(issue.number));
+    const result = await triage(
+      this.deps.runner,
+      reposDir,
+      available,
+      issue,
+      await this.budgetRemaining(issue.number),
+      override,
+    );
     await this.charge(issue.number, null, result.costUsd, "triage");
 
     if (result.limitHit) {
@@ -389,8 +467,16 @@ export class Pipeline {
 
     if (!result.fixable) {
       this.narrate(issue.number, `Not actionable — marking won't-fix: ${result.reason}`);
-      this.deps.github.closeWontFix(issue.number, `🤖 Closing as won't-fix: ${result.reason}`);
-      await this.setPhase(issue.number, "WONTFIX", { error: result.reason });
+      this.deps.github.closeWontFix(
+        issue.number,
+        `🤖 Closing as won't-fix: ${result.reason}\n\n` +
+          `_If you think this should be looked at anyway, @${this.deps.config.botLogin} me on this ` +
+          `issue with what to investigate and I'll reopen it and take another look._`,
+      );
+      // Anchor the @-mention re-arm trigger to AFTER this close comment, so an old
+      // mention in the history can't re-open the case (mirrors the /retry anchor).
+      const anchorId = this.deps.github.lastCommentId(issue.number) ?? null;
+      await this.setPhase(issue.number, "WONTFIX", { error: result.reason, needsHumanCommentId: anchorId });
       return false;
     }
 

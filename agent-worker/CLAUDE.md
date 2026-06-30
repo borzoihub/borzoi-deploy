@@ -40,7 +40,9 @@ the usual "ask a human first" rule — but only at gated points:
 - close as resolved (→ *Löst*) **only** after tests pass, review is clean, and a
   PR exists.
 - close as won't-fix (→ *Avvisad*) **only** when triage finds the case not
-  actionable.
+  actionable. This is reversible: an authorized maintainer can override it by
+  @-mentioning the bot on the issue (see *Overriding a won't-fix / re-arming via
+  @-mention* below).
 
 Anything uncertain (tests won't pass, review won't converge, the right repo
 isn't cloned, an error) falls back to a `needs-human` label + comment — it never
@@ -86,6 +88,7 @@ unreachable a tick fails and retries rather than advancing on stale state.
 
 ```
 NEW ── triage ──► not fixable ─────────────────► WONTFIX (close, Avvisad)
+        │                                          └─ maintainer @-mention reopens + re-arms
         │              repo not cloned ─────────► WAIT (retry every tick until cloned)
         ▼ fixable
 BRANCH  (add in-progress; git worktree off default branch: features/<id>-<slug>)
@@ -212,6 +215,31 @@ multiple stacked `/retry` comments — and the maintainer gets a visible "picked
 up" signal. The `needs_human_comment_id` anchor scopes the scan to the current
 hand-off; a null anchor (a case parked before this feature existed) scans all
 comments and relies on the reaction marker, so legacy cases stay `/retry`-able.
+
+### Overriding a won't-fix / re-arming via @-mention
+
+The issue-side equivalent of the post-completion PR-feedback loop. An authorized
+maintainer can re-arm a terminal case — **won't-fix** *or* **needs-human** — by
+**@-mentioning the bot** (`BOT_GH_LOGIN`) on the issue itself with what to do.
+This is how a human overrides a won't-fix the bot got wrong: the close reflects
+the bot's *own* judgement that the case isn't actionable, and a maintainer
+outranks that.
+
+`pipeline.rearmOnIssueMention` (polled each tick for WONTFIX + NEEDS_HUMAN cases;
+won't-fix issues are *closed*, so they're pulled from the journal, not the open
+list) **reopens** a closed won't-fix issue (dropping the `wontfix` label), gives
+the case a **fresh budget envelope** (resets `cost_usd`, keeps
+`lifetime_cost_usd`), un-sticks given-up sub-tasks, drops to `NEW`, and re-runs
+it. Crucially, the maintainer's comment is handed to **triage as an authoritative
+override directive** (`maintainerOverrideBlock` in `prompts.ts`) so triage
+investigates and identifies the repo(s) instead of re-closing won't-fix — it only
+returns not-fixable again if there's genuinely no code surface, and must say why.
+
+Authorization, the @-mention word-boundary match (`findUnhandledMention`), the
+👀-reaction idempotency marker, and the close-comment anchor all mirror `/retry`
+and the PR-feedback loop. `/retry` (command, fresh attempt, no guidance) and an
+@-mention (carries an instruction + can reopen a won't-fix) coexist; a plain
+`/retry` doesn't @-mention the bot, so they never fire on the same comment.
 
 Repos are **not** configured — a human pre-clones the workable repos into
 `REPOS_DIR` (symlinks are followed); any git repo found there is fair game. If a

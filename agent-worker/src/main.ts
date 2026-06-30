@@ -228,6 +228,22 @@ async function tick(deps: {
     }
   }
 
+  // 1.6 Re-arm a terminal case when an authorized maintainer @-mentions the bot on
+  // the issue itself — the issue-side equivalent of the PR-feedback loop, and the
+  // way to override a won't-fix close ("look at it anyway"). Won't-fix cases are
+  // CLOSED, so they're NOT in `open` — fetch them from the journal. needsHuman
+  // cases (open, loaded above) get the same @-mention path in addition to /retry.
+  const wontfix = await state.allInPhase("WONTFIX");
+  const rearmable = [...wontfix, ...needsHuman];
+  for (const row of rearmable) {
+    try {
+      await pipeline.rearmOnIssueMention(github.view(row.issueNumber), row);
+    } catch (e) {
+      if (e instanceof ShutdownError) throw e;
+      console.error(`[${ts()}]   issue-mention check failed for #${row.issueNumber}:`, e);
+    }
+  }
+
   // 2. Drive actionable cases forward, sequentially.
   for (const row of actionable) {
     console.log(`[${ts()}]   ▶ #${row.issueNumber} (${row.phase}): processing…`);

@@ -1,5 +1,6 @@
 import { expect } from "chai";
 import { slugify, mentionsBot, feedbackForBot } from "../pipeline.js";
+import { triageSystemPrompt } from "../prompts.js";
 import type { PrComment } from "../github.js";
 
 describe("slugify", () => {
@@ -64,5 +65,29 @@ describe("feedbackForBot", () => {
 
   it("returns an empty array when nothing mentions the bot", () => {
     expect(feedbackForBot([make("a", "nice work")], bot)).to.deep.equal([]);
+  });
+});
+
+describe("triageSystemPrompt", () => {
+  it("omits the maintainer-override block by default", () => {
+    const prompt = triageSystemPrompt(["borzoi-backend"]);
+    expect(prompt).to.not.match(/MAINTAINER OVERRIDE/i);
+  });
+
+  it("injects the maintainer instruction as an authoritative override", () => {
+    const prompt = triageSystemPrompt(
+      ["borzoi-backend"],
+      "This is a real bug, please dig into the scheduler.",
+    );
+    expect(prompt).to.match(/MAINTAINER OVERRIDE IS IN EFFECT/);
+    // The verbatim instruction is quoted so triage sees exactly what was asked.
+    expect(prompt).to.include("> This is a real bug, please dig into the scheduler.");
+    // It must push triage toward fixable rather than re-closing won't-fix.
+    expect(prompt).to.match(/Treat the case as fixable/);
+  });
+
+  it("quotes a multi-line instruction across every line", () => {
+    const prompt = triageSystemPrompt(["borzoi-backend"], "line one\nline two");
+    expect(prompt).to.include("> line one\n> line two");
   });
 });

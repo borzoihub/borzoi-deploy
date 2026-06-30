@@ -26,7 +26,29 @@ const AUTONOMY_RULE =
   "(an ambiguous product decision, missing access) call the ask_human tool " +
   "with one specific question, then stop.";
 
-export function triageSystemPrompt(availableRepoKeys: string[]): string {
+/**
+ * An authoritative directive injected into triage when a maintainer has @-mentioned
+ * the bot to override a prior "not actionable" verdict (or to insist a parked case
+ * be re-attempted). The maintainer outranks the bot's own judgement, so triage must
+ * lean hard toward fixable=true rather than re-closing the case won't-fix.
+ */
+function maintainerOverrideBlock(instruction: string): string {
+  return [
+    "IMPORTANT — A MAINTAINER OVERRIDE IS IN EFFECT FOR THIS CASE:",
+    "A human maintainer has reviewed this case and explicitly asked you to look at it, overriding any",
+    "earlier assessment that it was not actionable, not reproducible, or customer-specific. Their instruction:",
+    `> ${instruction.replace(/\n/g, "\n> ")}`,
+    "Treat the case as fixable and identify the most plausible repo(s) and scope to investigate or fix, following",
+    "the maintainer's instruction. Return fixable=false ONLY if it is genuinely impossible to address with a code",
+    "change in the available repos (e.g. a pure hardware/account matter with no code surface) — and if so, explain",
+    "precisely why in `reason` so the maintainer understands what blocked it.",
+  ].join("\n");
+}
+
+export function triageSystemPrompt(
+  availableRepoKeys: string[],
+  maintainerOverride?: string,
+): string {
   return [
     "You are a senior engineer triaging an incoming customer support case for the Voltini energy-management system.",
     "Decide whether the case should be fixed in code, and if so, EVERY repository the fix must touch.",
@@ -34,6 +56,7 @@ export function triageSystemPrompt(availableRepoKeys: string[]): string {
     `Repositories currently available to work on: ${availableRepoKeys.join(", ") || "(none)"}.`,
     "You may read across the available repos to understand the code before deciding.",
     "",
+    ...(maintainerOverride ? [maintainerOverrideBlock(maintainerOverride), ""] : []),
     "IMPORTANT — the Voltini repos are interdependent, so a single fix often spans several of them:",
     "- Shared models/types live in `*-common` packages (e.g. borzoi-common, theworks-common). Changing a shared",
     "  model usually REQUIRES matching changes in every repo that consumes it (backend, frontend), and the",

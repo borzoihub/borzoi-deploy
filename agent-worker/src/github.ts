@@ -304,6 +304,20 @@ export class GitHub {
     ]);
   }
 
+  /**
+   * Reopen a closed issue — e.g. a maintainer overriding a won't-fix close by
+   * telling the bot to look at it anyway. The customer sees it move back to an
+   * open ("under investigation") state once work restarts.
+   */
+  reopenIssue(number: number): void {
+    this.ghMutate([
+      "issue",
+      "reopen",
+      String(number),
+      ...this.repoArgs(),
+    ]);
+  }
+
   /** Close as won't-fix → Avvisad. Removes in-progress, adds wontfix. */
   closeWontFix(number: number, body: string): void {
     this.removeLabel(number, LABEL_IN_PROGRESS);
@@ -396,6 +410,38 @@ export class GitHub {
     for (const c of tail) {
       if (!c.author || c.author === this.config.botLogin) continue;
       if (!c.body.toLowerCase().includes(cmd)) continue;
+      if (!this.isAuthorizedMaintainer(c.author)) continue;
+      if (this.hasBotReacted(c.id)) continue; // already handled
+      return c;
+    }
+    return undefined;
+  }
+
+  /**
+   * The first UNHANDLED issue comment that @-mentions the bot, from an authorized
+   * maintainer. This is the issue-side analogue of the post-completion PR-feedback
+   * trigger: a maintainer who disagrees with a won't-fix (or wants a parked
+   * needs-human case re-attempted) just @-mentions the bot on the issue with what
+   * to do, instead of remembering a slash command.
+   *
+   * Same gates as `findUnhandledCommand`: the author must have write access to the
+   * support repo (customers never do), and the 👀 reaction marks a comment handled
+   * so a single mention fires exactly once across ticks/restarts. `afterCommentId`
+   * (the bot's close/hand-off comment) scopes the scan to the current episode; a
+   * null anchor scans all comments and relies on the reaction marker.
+   */
+  findUnhandledMention(
+    number: number,
+    afterCommentId: string | null,
+  ): IssueComment | undefined {
+    const detail = this.view(number);
+    const idx = afterCommentId ? detail.comments.findIndex((c) => c.id === afterCommentId) : -1;
+    const tail = idx >= 0 ? detail.comments.slice(idx + 1) : detail.comments;
+    // Word-bounded so `@voltini-bot` doesn't match `@voltini-bot-helper`.
+    const mention = new RegExp(`@${this.config.botLogin}(?![a-zA-Z0-9-])`, "i");
+    for (const c of tail) {
+      if (!c.author || c.author === this.config.botLogin) continue;
+      if (!mention.test(c.body)) continue;
       if (!this.isAuthorizedMaintainer(c.author)) continue;
       if (this.hasBotReacted(c.id)) continue; // already handled
       return c;

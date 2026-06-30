@@ -59,14 +59,16 @@ export async function triage(
   availableRepoKeys: string[],
   issue: IssueDetail,
   budgetUsd: number,
+  maintainerOverride?: string,
 ): Promise<TriageResult> {
   console.log(
-    `[triage] #${issue.number}: available repos = [${availableRepoKeys.join(", ") || "none"}]`,
+    `[triage] #${issue.number}: available repos = [${availableRepoKeys.join(", ") || "none"}]` +
+      (maintainerOverride ? " (maintainer override in effect)" : ""),
   );
   const result = await runner.run({
     label: `triage #${issue.number}`,
     cwd: reposDir,
-    systemPrompt: triageSystemPrompt(availableRepoKeys),
+    systemPrompt: triageSystemPrompt(availableRepoKeys, maintainerOverride),
     prompt: triagePrompt(issue),
     maxTurns: TRIAGE_MAX_TURNS,
     maxBudgetUsd: budgetUsd,
