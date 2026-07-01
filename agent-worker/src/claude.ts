@@ -1,6 +1,7 @@
 import { query, AbortError, type Options } from "@anthropic-ai/claude-agent-sdk";
 import type { Config } from "./config.js";
 import { createAskHuman, type AskHumanHandle } from "./askHuman.js";
+import { createInstallationData } from "./installationData.js";
 
 /**
  * Thin wrapper over the Claude Agent SDK `query()`.
@@ -60,6 +61,12 @@ export interface RunOptions {
   outputSchema?: Record<string, unknown>;
   /** Enable the ask_human channel (implement/review sessions). */
   enableAskHuman?: boolean;
+  /**
+   * Enable the read-only live-installation-data tools (get_installation_catalog
+   * + query_installation_data) for the given case. Used by triage and implement
+   * to investigate the reporting Hub's real energy data via central.
+   */
+  dataQuery?: { issueNumber: number };
   /** Short label for log lines, e.g. "triage #22". Defaults to the cwd. */
   label?: string;
 }
@@ -160,9 +167,19 @@ export class ClaudeRunner {
       const { $schema: _drop, ...schema } = opts.outputSchema as Record<string, unknown>;
       options.outputFormat = { type: "json_schema", schema };
     }
+    // Both the ask_human channel and the live-data tools are SDK MCP servers;
+    // merge them so a session can carry both at once (implement uses both).
+    const mcpServers: NonNullable<Options["mcpServers"]> = {};
     if (opts.enableAskHuman) {
       askHuman = createAskHuman(abort);
-      options.mcpServers = { [askHuman.serverName]: askHuman.server };
+      mcpServers[askHuman.serverName] = askHuman.server;
+    }
+    if (opts.dataQuery) {
+      const data = createInstallationData(this.config, opts.dataQuery.issueNumber);
+      mcpServers[data.serverName] = data.server;
+    }
+    if (Object.keys(mcpServers).length > 0) {
+      options.mcpServers = mcpServers;
     }
 
     const label = opts.label ?? opts.cwd;

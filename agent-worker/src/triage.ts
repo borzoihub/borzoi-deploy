@@ -72,6 +72,7 @@ export async function triage(
     prompt: triagePrompt(issue),
     maxTurns: TRIAGE_MAX_TURNS,
     maxBudgetUsd: budgetUsd,
+    dataQuery: { issueNumber: issue.number },
     outputSchema: z.toJSONSchema(TriageSchema) as Record<string, unknown>,
   });
 

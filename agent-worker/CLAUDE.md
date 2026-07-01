@@ -111,6 +111,18 @@ issue comment and parks the case (BLOCKED). Each poll tick checks BLOCKED cases
 for a reply by a non-bot author after the question comment, then resumes the
 saved Agent SDK session with the answer.
 
+**Live installation data:** the **triage** and **implement** sessions also get
+two read-only MCP tools — `get_installation_catalog` and
+`query_installation_data` — to inspect the reporting Hub's *actual* energy data
+(the same AI Query Service a human maintainer hits with `.claude/ai-token.txt`;
+see `borzoi-backend/docs/AI_QUERY_SERVICE.md`). They proxy through central
+(`/api/support/agent/cases/{n}/ai-catalog` + `/ai-query`), which resolves the
+case → `installation_id` → Hub and mints a system SSO token — the worker never
+needs a hub URL or the issue body's installation id. Querying is read-only and
+pushes no customer notification, so it needs no customer-facing gate. A Hub in a
+customer home is often offline; a failed call returns a descriptive message and
+the session proceeds without live data rather than parking the case.
+
 ### Post-completion PR feedback
 
 After a case is DONE, each tick also watches its opened PR(s) for a maintainer
@@ -146,6 +158,7 @@ re-notified. Gates and safety:
 | `state.ts` | Central case-journal HTTP client (over voltini.energy-backend's `/api/support/agent/*`). |
 | `claude.ts` | Agent SDK `query()` wrapper (cwd, model, bypass, resume, structured output). |
 | `askHuman.ts` | The `ask_human` MCP tool + parked-state signalling. |
+| `installationData.ts` | Read-only live-data MCP tools (catalog + query) for triage/implement, proxied through central to the reporting Hub. |
 | `triage.ts` | Triage session → `{ fixable, repoKey, reason }`. |
 | `implement.ts` | Implement session + independent test-verify + PR-feedback session. |
 | `review.ts` | Adapted `!perfect-review` (5 perspectives) + the fix session. |

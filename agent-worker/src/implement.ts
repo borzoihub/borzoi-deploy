@@ -59,6 +59,7 @@ export async function implement(
     maxTurns: config.maxImplementTurns,
     maxBudgetUsd: budgetUsd,
     enableAskHuman: true,
+    dataQuery: { issueNumber: issue.number },
   });
 }
 

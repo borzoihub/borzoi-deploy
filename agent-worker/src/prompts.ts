@@ -19,6 +19,26 @@ function issueContext(issue: IssueDetail): string {
   ].join("\n");
 }
 
+/**
+ * Tells a session about the read-only live-data tools (only present on triage
+ * and implement). The reporting installation is a real customer Hub, so the
+ * actual energy data often reveals a root cause the issue text only hints at —
+ * the same data a human maintainer would pull from the AI Query Service.
+ */
+const LIVE_DATA_GUIDANCE =
+  "INVESTIGATING WITH LIVE INSTALLATION DATA:\n" +
+  "This case was reported from a real customer Hub. You have two read-only tools to inspect its " +
+  "actual energy data:\n" +
+  "- `get_installation_catalog` — what metrics, settings, devices, and live predictions exist " +
+  "(and tips for common investigations). Call this FIRST to learn exact names.\n" +
+  "- `query_installation_data` — fetch specific metrics/settings/breakdowns over a time window.\n" +
+  "When the case concerns the system's actual behaviour (a peak exceeded, unexpected cost, " +
+  "battery/EV/solar/heating not doing what the customer expected), use these to confirm the root " +
+  "cause against real data before concluding — don't guess from the issue text alone. Keep the " +
+  "window narrow and prefer `summaryOnly` for wide ranges (each metric already returns " +
+  "min/max/avg/count). The Hub may be offline or unlinked; if a call reports data is unavailable, " +
+  "proceed from the issue and code — never block the case on it.";
+
 const AUTONOMY_RULE =
   "You are operating fully autonomously on a headless machine. No human is " +
   "watching in real time. Work to completion without asking for confirmation. " +
@@ -64,6 +84,8 @@ export function triageSystemPrompt(
     "- A behaviour that's visible in the frontend may have its root cause (and its fix) in the backend, or vice versa.",
     "List ALL repos a correct, complete fix needs — not just the most obvious one. Each becomes its own branch and PR.",
     "",
+    LIVE_DATA_GUIDANCE,
+    "",
     "Classify:",
     "- fixable=true only for an actual code defect or a small, well-specified change you can implement in the available repos.",
     "- fixable=false for questions, user-error, duplicates, vague feature wishes, or anything not actionable as a code change.",
@@ -100,6 +122,8 @@ export function implementSystemPrompt(
     "4. Run the repo's test suite and make it pass.",
     "5. Commit your work with a clear message referencing the issue number.",
     "Do not push or open a pull request — the orchestrator handles that.",
+    "",
+    LIVE_DATA_GUIDANCE,
     "",
     issueContext(issue),
   ].join("\n");
