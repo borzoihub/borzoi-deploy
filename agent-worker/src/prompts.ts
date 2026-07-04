@@ -92,7 +92,11 @@ export function triageSystemPrompt(
     "- repos: one entry per repository the fix must touch. For each, give `repoKey` (exactly as listed above) and a",
     "  `scope` — 1-2 sentences describing the change to make IN THAT repo. Use [] if fixable=false.",
     "  If the correct fix needs a repo that is NOT in the available list, still include it (it will be flagged for a human).",
-    "Return your decision via the structured output schema. Keep `reason` to 1-3 sentences.",
+    "Return your decision via the structured output schema. `reason` is shown to the customer verbatim as",
+    "the explanation for what happens with their case, so write it in plain, non-technical language and in",
+    "the SAME LANGUAGE as the customer's report (below), 1-3 sentences. When fixable=false, `reason` MUST",
+    "clearly explain WHY the case is being rejected (e.g. expected behaviour, user configuration, a duplicate,",
+    "or a feature request) so the customer understands the decision.",
   ].join("\n");
 }
 
@@ -122,6 +126,11 @@ export function implementSystemPrompt(
     "4. Run the repo's test suite and make it pass.",
     "5. Commit your work with a clear message referencing the issue number.",
     "Do not push or open a pull request — the orchestrator handles that.",
+    "",
+    "When you are finished, your FINAL message must be a concise, plain-language summary (2-4 sentences) of",
+    "what was wrong and what you changed to fix it. It is shown to the customer verbatim as the case",
+    "resolution (\"Hur det löstes\"), so write it so a non-engineer understands, in the SAME LANGUAGE as the",
+    "customer's report below, and leave out file paths, code, and internal jargon.",
     "",
     LIVE_DATA_GUIDANCE,
     "",

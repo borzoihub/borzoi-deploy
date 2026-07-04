@@ -177,7 +177,14 @@ export class Pipeline {
     // Anchor for the /retry trigger: only a command posted AFTER this comment
     // re-arms the case (so old history can't re-fire it).
     const anchorId = this.deps.github.lastCommentId(issue.number) ?? null;
-    await this.setPhase(issue.number, "NEEDS_HUMAN", { error: message, needsHumanCommentId: anchorId });
+    // Always leave a customer-readable account of what happened under "Hur det
+    // löstes" — here: the bot did some work but couldn't finish autonomously and
+    // handed the case to a person, with the reason why.
+    await this.setPhase(issue.number, "NEEDS_HUMAN", {
+      error: message,
+      needsHumanCommentId: anchorId,
+      solutionSummary: `Kunde inte lösas automatiskt och har lämnats över till en människa för fortsatt hantering. Orsak: ${message}`,
+    });
   }
 
   /**
@@ -340,13 +347,46 @@ export class Pipeline {
   }
 
   /**
+   * Tell the customer (status → "Under utredning") and stamp the frontend
+   * timeline's "Agent started" event the MOMENT the bot picks a fresh case up —
+   * BEFORE triage or any other AI work runs.
+   *
+   * Both effects flow from two writes:
+   *  - the `in-progress` label makes `deriveStatus` return `in_progress` (→ *Under
+   *    utredning*) and pushes the customer a status-change notification.
+   *  - flipping the central phase off NEW makes the backend stamp
+   *    `support_case.worker_started_at`, which the support-case timeline renders as
+   *    the `picked_up` ("Agent started") event. Set once; never overwritten.
+   *
+   * Previously both only happened at the END of triage, so a reporter saw no
+   * movement — and the timeline showed nothing — while the agent was already
+   * investigating. Idempotent: callers gate on phase===NEW, and both writes are
+   * safe to repeat.
+   */
+  private async markPickedUp(issue: IssueDetail): Promise<void> {
+    this.narrate(issue.number, `Picking up "${issue.title}" — marking active (Under utredning) before starting work.`);
+    this.deps.github.addLabel(issue.number, LABEL_IN_PROGRESS);
+    await this.setPhase(issue.number, "WORKING", { title: issue.title });
+  }
+
+  /**
    * Advance a case as far as possible this invocation. `triageOverride`, when
    * present, is a maintainer's authoritative instruction (from an @-mention re-arm)
    * handed to triage so a previously not-actionable case is investigated rather
    * than re-closed won't-fix.
    */
   async processCase(issue: IssueDetail, row: CaseRow, triageOverride?: string): Promise<void> {
-    if (row.phase === "NEW") {
+    // Announce the pickup to the customer + timeline before doing any work.
+    if (row.phase === "NEW") await this.markPickedUp(issue);
+
+    // Triage/recover until the case has concrete repo sub-tasks. We gate on BOTH
+    // "still NEW" and "no sub-tasks yet": the NEW arm preserves the re-armed
+    // `/retry` path (which re-enters at NEW with its prior sub-tasks intact and
+    // relies on recoverExistingWork to reclaim committed work); the no-sub-tasks
+    // arm ensures a crash AFTER markPickedUp flipped the phase to WORKING but
+    // BEFORE triage recorded anything still gets (re)triaged rather than stalling
+    // as WORKING-with-nothing-to-drive.
+    if (row.phase === "NEW" || (await this.deps.state.getRepoTasks(issue.number)).length === 0) {
       // First, recover any work a previous (possibly crashed, or pre-journal-wipe)
       // attempt left behind — an open PR or a branch with commits — so we never
       // start over on a case that's already done or half-done.
@@ -476,7 +516,14 @@ export class Pipeline {
       // Anchor the @-mention re-arm trigger to AFTER this close comment, so an old
       // mention in the history can't re-open the case (mirrors the /retry anchor).
       const anchorId = this.deps.github.lastCommentId(issue.number) ?? null;
-      await this.setPhase(issue.number, "WONTFIX", { error: result.reason, needsHumanCommentId: anchorId });
+      // Record WHY it was rejected under "Hur det löstes" so the customer always
+      // gets an explanation, not a blank field. `reason` is the agent's
+      // customer-facing rationale (also posted as the close comment above).
+      await this.setPhase(issue.number, "WONTFIX", {
+        error: result.reason,
+        needsHumanCommentId: anchorId,
+        solutionSummary: `Ärendet bedömdes inte kräva någon kodändring och avvisades. Motivering: ${result.reason}`,
+      });
       return false;
     }
 
@@ -515,9 +562,10 @@ export class Pipeline {
       : "";
     this.narrate(
       issue.number,
-      `Fixable — will open ${result.repos.length + result.missingRepos.length} PR(s) across: ${repoList}${missingNote}. Marking active.`,
+      `Fixable — will open ${result.repos.length + result.missingRepos.length} PR(s) across: ${repoList}${missingNote}.`,
     );
-    this.deps.github.addLabel(issue.number, LABEL_IN_PROGRESS);
+    // The case was already marked active (in-progress label + timeline start) at
+    // pickup, before triage ran — see markPickedUp.
     return true;
   }
 
@@ -613,8 +661,9 @@ export class Pipeline {
     }
 
     if (recovered) {
+      // Record the slug/title; the in-progress label + timeline start were already
+      // applied at pickup (markPickedUp), so no label write is needed here.
       await this.setPhase(issue.number, "WORKING", { slug, title: issue.title });
-      this.deps.github.addLabel(issue.number, LABEL_IN_PROGRESS);
     }
     return recovered;
   }
@@ -884,12 +933,24 @@ export class Pipeline {
     await this.cleanupWorktrees(issue.number);
   }
 
-  /** Combine the per-repo fix summaries into one case-level solution description. */
-  private aggregateSolution(tasks: RepoTaskRow[]): string | null {
+  /**
+   * Combine the per-repo fix summaries into one case-level solution description
+   * for "Hur det löstes". Never null: if no per-repo summary was captured (e.g. a
+   * recovered case whose PR predates this journal, so no implement session ran),
+   * fall back to a factual account of what shipped so the field is always
+   * populated.
+   */
+  private aggregateSolution(tasks: RepoTaskRow[]): string {
     const parts = tasks
       .filter((t) => t.fixSummary)
       .map((t) => (tasks.length > 1 ? `**${t.repoKey}**: ${t.fixSummary}` : t.fixSummary!));
-    return parts.length ? parts.join("\n\n") : null;
+    if (parts.length) return parts.join("\n\n");
+    const repos = tasks.map((t) => t.repoKey).join(", ");
+    const prCount = tasks.filter((t) => t.prUrl).length;
+    return (
+      `Åtgärdat i ${repos}. Ändringen levererades i ${prCount} pull request${prCount === 1 ? "" : "s"} ` +
+      `som en människa kan granska och släppa.`
+    );
   }
 
   /** Continue parked sub-tasks once a human has replied to their question(s). */
