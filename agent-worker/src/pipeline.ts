@@ -22,6 +22,7 @@ import {
   type Repo,
 } from "./repos.js";
 import { triage, type ChangeKind } from "./triage.js";
+import { explainRejection } from "./rejectionExplanation.js";
 import { implement, addressPrFeedback, verifyTests } from "./implement.js";
 import { review, reviewFix, isBlocking, formatFindings, type ReviewResult } from "./review.js";
 import { openPr, findExistingPr, findExistingPrForIssue, parsePrNumber, pushBranch } from "./pr.js";
@@ -686,13 +687,26 @@ export class Pipeline {
       // Anchor the @-mention re-arm trigger to AFTER this close comment, so an old
       // mention in the history can't re-open the case (mirrors the /retry anchor).
       const anchorId = this.deps.github.lastCommentId(issue.number) ?? null;
-      // Record WHY it was rejected under "how it was solved" so the customer
-      // always gets an explanation, not a blank field. `reason` is the agent's
-      // customer-facing rationale (also posted as the close comment above).
+      // The homeowner sees `solutionSummary` verbatim as the reason their case was
+      // declined. `result.reason` is produced while reading the internal repos, so
+      // it can carry implementation detail or unverified guesses — run it through a
+      // dedicated pass that rewrites it into a safe, honest, non-technical
+      // explanation before it becomes customer-facing. The pass falls back to a
+      // generic safe message on failure, never to the raw internal reason.
+      const rejection = await explainRejection(
+        this.deps.runner,
+        this.deps.config.reposDir,
+        issue,
+        result.reason,
+        await this.budgetRemaining(issue.number),
+      );
+      await this.charge(issue.number, null, rejection.costUsd, "reject-explain");
       await this.setPhase(issue.number, "WONTFIX", {
+        // `error` keeps the internal rationale for operators (dashboard-only, not
+        // shown to the homeowner); `solutionSummary` is the sanitised copy.
         error: result.reason,
         needsHumanCommentId: anchorId,
-        solutionSummary: `This case was assessed as not requiring a code change and was declined. Reason: ${result.reason}`,
+        solutionSummary: rejection.explanation,
       });
       return false;
     }

@@ -113,6 +113,62 @@ export function triagePrompt(issue: IssueDetail): string {
   return issueContext(issue);
 }
 
+/**
+ * System prompt for the dedicated "safe rejection explanation" pass.
+ *
+ * Triage's `reason` is produced while reading across the internal code repos, so
+ * it can carry implementation detail, guesses, or wording that must never reach
+ * a homeowner. This pass takes that internal rationale plus the customer's own
+ * report and rewrites it into a short, honest, non-technical explanation that is
+ * safe to show verbatim in the app as "why your case was declined". It is given
+ * NO tools and must rely solely on the text provided — it does not investigate.
+ */
+export function rejectionExplanationSystemPrompt(): string {
+  return [
+    "You write the customer-facing explanation shown to a non-technical Voltini homeowner for WHY the",
+    "support case they reported was declined (closed without a code change).",
+    "",
+    "You are given two things: (a) the customer's own report, and (b) an INTERNAL engineering rationale",
+    "for the decision. The internal rationale is written for engineers and may contain technical detail,",
+    "file paths, code, repository or system names, configuration, credentials, or unverified guesses.",
+    "Your output is shown to the homeowner VERBATIM, so it must be safe on its own.",
+    "",
+    "Hard rules:",
+    "- NEVER reveal internal implementation detail: no file paths, code, function/variable/class names,",
+    "  repository names, configuration, environment variables, credentials, tokens, secrets, server or",
+    "  infrastructure details, or the names of internal systems. The only system name you may use is the",
+    "  product name \"Voltini\". NEVER write \"Borzoi\".",
+    "- NEVER present a technical cause you are not certain of as if it were fact. If the internal rationale",
+    "  is speculative or you are unsure, keep the explanation general and honest (e.g. \"this reflects how",
+    "  the system is currently designed to work\", \"this is expected behaviour\", \"we've noted this as a",
+    "  suggestion\", \"this appears to already be covered by another case\") rather than inventing a cause.",
+    "- Do NOT copy the internal rationale verbatim — rewrite it in your own plain words.",
+    "- Be respectful, clear, and brief: 1-3 short sentences in plain, non-technical language.",
+    "- Write in English (translate if the report is in another language).",
+    "",
+    "Explain, at a level the homeowner understands, why the case is being closed without a code change —",
+    "for example expected behaviour, a settings/configuration matter, a duplicate of another case, or a",
+    "feature suggestion that has been noted. Return the explanation via the structured output schema.",
+  ].join("\n");
+}
+
+/**
+ * User prompt for the rejection-explanation pass: the customer's report plus the
+ * internal rationale to be rewritten safely. We pass the full issue context so
+ * the explanation can speak to what the customer actually reported.
+ */
+export function rejectionExplanationPrompt(issue: IssueDetail, internalReason: string): string {
+  return [
+    issueContext(issue),
+    "",
+    "--- INTERNAL engineering rationale for declining this case (DO NOT reveal verbatim; rewrite safely) ---",
+    internalReason,
+    "--- end internal rationale ---",
+    "",
+    "Write the homeowner-facing explanation now.",
+  ].join("\n");
+}
+
 export function implementSystemPrompt(
   issue: IssueDetail,
   scope?: RepoScope,
