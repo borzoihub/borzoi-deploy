@@ -66,6 +66,14 @@ export interface CaseRow {
   needsHumanCommentId: string | null;
   /** Customer-readable summary of how the bug was fixed (set on resolve). */
   solutionSummary: string | null;
+  /**
+   * Operator pause switch (set from the installer portal). When true the poll
+   * loop must NOT pick this case up, and a case already being worked stops at
+   * the next safe point — committing its in-flight work first — and is left
+   * where it is so a later resume can continue. Central owns this flag; the
+   * worker only reads it.
+   */
+  paused: boolean;
   updatedAt: string;
 }
 
@@ -116,6 +124,7 @@ interface CaseDto {
   lifetimeCostUsd: number;
   needsHumanCommentId: string | null;
   solutionSummary: string | null;
+  paused: boolean;
   updatedAt: string | null;
   repoTasks: RepoTaskDto[];
 }
@@ -156,6 +165,7 @@ function toCaseRow(dto: CaseDto): CaseRow {
     lifetimeCostUsd: dto.lifetimeCostUsd ?? 0,
     needsHumanCommentId: dto.needsHumanCommentId,
     solutionSummary: dto.solutionSummary,
+    paused: !!dto.paused,
     updatedAt: dto.updatedAt ?? "",
   };
 }
@@ -284,6 +294,24 @@ export class StateStore {
       { repoKey, deltaUsd },
     );
     return result.costUsd ?? 0;
+  }
+
+  /**
+   * Append a granular worker-activity event (triage/implement/test/review) to the
+   * case's central timeline journal. Informational/maintainer-only — it never
+   * changes the customer-facing status. Central collapses consecutive duplicates,
+   * so re-driving the same phase across ticks doesn't spam the timeline. `repoKey`
+   * is null for case-level steps (triage).
+   */
+  async recordEvent(
+    issueNumber: number,
+    kind: string,
+    repoKey: string | null = null,
+  ): Promise<void> {
+    await this.request("POST", `/api/support/agent/cases/${issueNumber}/events`, {
+      kind,
+      repoKey,
+    });
   }
 
   // --- Per-repo sub-tasks ---------------------------------------------------

@@ -5,7 +5,7 @@ import { loadConfig, type Config } from "./config.js";
 import { GitHub } from "./github.js";
 import { phaseFromGitHub } from "./githubPhase.js";
 import { StateStore, type Phase, type RepoTaskRow } from "./state.js";
-import { ClaudeRunner, ShutdownError } from "./claude.js";
+import { ClaudeRunner, ShutdownError, PauseError } from "./claude.js";
 import { Pipeline } from "./pipeline.js";
 
 /**
@@ -197,9 +197,16 @@ async function tick(deps: {
     );
   }
 
-  const parked = (await state.allInPhase("BLOCKED")).filter((r) => openNumbers.has(r.issueNumber));
+  // Operator-paused cases are excluded from every work set below: a paused NEW
+  // case is never picked up (it stays queued on the dashboard, no customer
+  // notification), and a paused case already in flight isn't advanced/resumed/
+  // retried/re-armed until the operator resumes it. (A case paused WHILE being
+  // worked is stopped from inside processCase's pause watcher, not here.)
+  const parked = (await state.allInPhase("BLOCKED")).filter(
+    (r) => openNumbers.has(r.issueNumber) && !r.paused,
+  );
   const actionable = (await state.all()).filter(
-    (r) => ACTIONABLE_PHASES.includes(r.phase) && openNumbers.has(r.issueNumber),
+    (r) => ACTIONABLE_PHASES.includes(r.phase) && openNumbers.has(r.issueNumber) && !r.paused,
   );
 
   // 1. Resume any parked case whose human question has been answered.
@@ -216,8 +223,8 @@ async function tick(deps: {
   // 1.5 Re-run any needs-human case where an authorized maintainer commented
   // /retry. retryIfRequested drives the re-armed case itself, so these don't
   // need to also appear in the actionable pass below.
-  const needsHuman = (await state.allInPhase("NEEDS_HUMAN")).filter((r) =>
-    openNumbers.has(r.issueNumber),
+  const needsHuman = (await state.allInPhase("NEEDS_HUMAN")).filter(
+    (r) => openNumbers.has(r.issueNumber) && !r.paused,
   );
   for (const row of needsHuman) {
     try {
@@ -233,7 +240,7 @@ async function tick(deps: {
   // way to override a won't-fix close ("look at it anyway"). Won't-fix cases are
   // CLOSED, so they're NOT in `open` — fetch them from the journal. needsHuman
   // cases (open, loaded above) get the same @-mention path in addition to /retry.
-  const wontfix = await state.allInPhase("WONTFIX");
+  const wontfix = (await state.allInPhase("WONTFIX")).filter((r) => !r.paused);
   const rearmable = [...wontfix, ...needsHuman];
   for (const row of rearmable) {
     try {
@@ -251,6 +258,13 @@ async function tick(deps: {
       await pipeline.processCase(github.view(row.issueNumber), (await state.get(row.issueNumber))!);
     } catch (e) {
       if (e instanceof ShutdownError) throw e;
+      if (e instanceof PauseError) {
+        // Operator paused it: in-flight work is committed on the branch and the
+        // case is left at its persisted phase. Don't flag needs-human — just
+        // stop touching it until the operator resumes.
+        console.log(`[${ts()}]   ⏸ #${row.issueNumber}: paused — committed work is on its branch; stopping until resumed.`);
+        continue;
+      }
       console.error(`[${ts()}]   processing failed for #${row.issueNumber} (will retry next tick):`, e);
       try {
         await state.update(row.issueNumber, { error: String(e) });
@@ -264,7 +278,7 @@ async function tick(deps: {
   // are CLOSED, so they are NOT in `open`/`openNumbers` — this pass works off the
   // journal independently. A case is watchable while it has a DONE sub-task with an
   // open PR we haven't stopped watching.
-  const doneCases = await state.allInPhase("DONE");
+  const doneCases = (await state.allInPhase("DONE")).filter((r) => !r.paused);
   const withPrFeedback: typeof doneCases = [];
   for (const c of doneCases) {
     const tasks = await state.getRepoTasks(c.issueNumber);

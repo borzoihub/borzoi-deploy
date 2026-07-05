@@ -4,7 +4,7 @@ import { GitHub } from "./github.js";
 import { phaseFromGitHub } from "./githubPhase.js";
 import { StateStore, type Phase } from "./state.js";
 import { discoverRepos, type Repo } from "./repos.js";
-import { findExistingPr } from "./pr.js";
+import { findExistingPrForIssue } from "./pr.js";
 
 /**
  * One-shot backfill: seed central from existing GitHub history.
@@ -85,11 +85,14 @@ async function main(): Promise<void> {
       continue;
     }
 
-    const branch = `features/${issue.number}-${slugify(issue.title)}`;
     let linkedHere = 0;
     for (const repo of repos) {
-      const pr = findExistingPr(config, repo, branch);
+      // Match by issue number rather than reconstructing the branch: its prefix
+      // (bugfix/features/improvements) + slug are triage-chosen and not derivable
+      // from the title. The PR's own head ref is the authoritative branch.
+      const pr = findExistingPrForIssue(config, repo, issue.number);
       if (!pr) continue;
+      const branch = pr.branch ?? `features/${issue.number}-${slugify(issue.title)}`;
       await state.ensureRepoTask(issue.number, repo.key, { branch });
       // Record the PR link + mark the sub-task DONE (a PR exists). Cost stays 0.
       await state.updateRepoTask(issue.number, repo.key, {

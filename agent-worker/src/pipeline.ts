@@ -2,7 +2,7 @@ import type { Config } from "./config.js";
 import type { GitHub, IssueDetail } from "./github.js";
 import { LABEL_IN_PROGRESS, LABEL_NEEDS_HUMAN, LABEL_WONTFIX, RETRY_COMMAND } from "./github.js";
 import type { StateStore, CaseRow, RepoTaskRow, RepoPhase } from "./state.js";
-import { ShutdownError, type ClaudeRunner, type RunResult } from "./claude.js";
+import { ShutdownError, PauseError, type ClaudeRunner, type RunResult } from "./claude.js";
 import {
   discoverRepos,
   findRepo,
@@ -12,17 +12,19 @@ import {
   removeWorktree,
   syncWorktreeToRemoteBranch,
   localBranchExists,
+  findIssueBranch,
   commitsAhead,
+  commitWorktree,
   hasWorktree,
   isWorktreeDirty,
   priorWorkSummary,
   repoSlug,
   type Repo,
 } from "./repos.js";
-import { triage } from "./triage.js";
+import { triage, type ChangeKind } from "./triage.js";
 import { implement, addressPrFeedback, verifyTests } from "./implement.js";
 import { review, reviewFix, isBlocking, formatFindings, type ReviewResult } from "./review.js";
-import { openPr, findExistingPr, parsePrNumber, pushBranch } from "./pr.js";
+import { openPr, findExistingPr, findExistingPrForIssue, parsePrNumber, pushBranch } from "./pr.js";
 import type { PrComment } from "./github.js";
 import { buildAndLink, packageName, dependsOn } from "./linking.js";
 import { resumeWithAnswerPrompt, type RepoScope } from "./prompts.js";
@@ -68,6 +70,22 @@ const MIN_SESSION_BUDGET_USD = 1.0;
 /** Cap on the per-repo fix summary persisted for the dashboard's resolved view. */
 const MAX_FIX_SUMMARY_CHARS = 2000;
 
+/**
+ * How often the pause watcher re-reads central for this case's `paused` flag
+ * while it's being worked. Central is the source of truth; the worker only
+ * learns of a pause by polling it.
+ */
+const PAUSE_POLL_MS = 15_000;
+
+/**
+ * Grace given to a running session to finish (and commit) on its own after a
+ * pause is requested, before the session is force-aborted. Pausing usually
+ * means the ground shifted and the current work is likely to be redone, so we
+ * don't let a long session run to completion — but a short one finishing
+ * cleanly beats an aborted WIP commit. Two minutes splits the difference.
+ */
+const PAUSE_GRACE_MS = 120_000;
+
 export function slugify(title: string): string {
   return (
     title
@@ -76,6 +94,35 @@ export function slugify(title: string): string {
       .replace(/^-+|-+$/g, "")
       .slice(0, 50) || "fix"
   );
+}
+
+/**
+ * Branch folder per change classification. Support work is rarely a brand-new
+ * feature, so triage classifies each case and we file it under the matching
+ * folder: verified defects under `bugfix/`, betterments under `improvements/`,
+ * genuinely new functionality under `features/`.
+ */
+const BRANCH_PREFIX: Record<ChangeKind, string> = {
+  bugfix: "bugfix",
+  improvement: "improvements",
+  feature: "features",
+};
+
+/**
+ * The branch a case's work lives on: `<prefix>/<issue#>-<slug>`. The prefix comes
+ * from triage's classification; the slug is triage's short English description of
+ * the fix (re-`slugify`d as a safety net). Deliberately carries NO installation
+ * name — that's recoverable from the issue number in the branch. Falls back to
+ * `bugfix` for an unrecognised kind.
+ */
+export function branchName(issueNumber: number, changeKind: ChangeKind, branchSlug: string): string {
+  const prefix = BRANCH_PREFIX[changeKind] ?? "bugfix";
+  return `${prefix}/${issueNumber}-${slugify(branchSlug)}`;
+}
+
+/** The slug portion of a `<prefix>/<n>-<slug>` branch — for recovery/display. */
+export function slugFromBranch(branch: string): string {
+  return branch.replace(/^[^/]+\/\d+-/, "") || branch;
 }
 
 /**
@@ -96,6 +143,11 @@ export function feedbackForBot(comments: PrComment[], botLogin: string): PrComme
 export class Pipeline {
   constructor(private readonly deps: PipelineDeps) {}
 
+  /** Issue numbers an operator has paused, as seen by the running pause watcher.
+   *  Read by `throwIfPaused` at phase boundaries to stop without an extra HTTP
+   *  round-trip on every check. */
+  private readonly pausedIssues = new Set<number>();
+
   private repoOrThrow(repoKey: string): Repo {
     const repo = findRepo(this.deps.config.reposDir, repoKey);
     if (!repo) {
@@ -107,6 +159,112 @@ export class Pipeline {
   /** Human-readable, one-line progress narration for an operator watching logs. */
   private narrate(issueNumber: number, message: string): void {
     console.log(`▶ #${issueNumber}: ${message}`);
+  }
+
+  // ── Operator pause ────────────────────────────────────────────────────────
+
+  /**
+   * Run `fn` (a whole processCase) under a pause watcher. The watcher polls
+   * central for this case's `paused` flag; on pause it lets the current session
+   * finish for a grace window (so its work commits normally), then force-aborts
+   * it. Either way the abort/next-boundary surfaces as a PauseError, which we
+   * catch here to commit any in-flight work before letting it propagate to the
+   * tick (which logs "paused" and moves on — NOT needs-human). The case is left
+   * on its committed branch at its persisted phase, ready to resume.
+   */
+  private async withPauseWatch<T>(issueNumber: number, fn: () => Promise<T>): Promise<T> {
+    let detectedAt: number | null = null;
+    const timer = setInterval(() => {
+      void (async () => {
+        let paused = false;
+        try {
+          paused = (await this.deps.state.get(issueNumber))?.paused ?? false;
+        } catch {
+          return; // transient central error — re-check next poll
+        }
+        if (!paused) return;
+        if (detectedAt == null) {
+          detectedAt = Date.now();
+          this.pausedIssues.add(issueNumber);
+          this.narrate(
+            issueNumber,
+            `Pause requested — stopping at the next safe point (force-stop in ${Math.round(PAUSE_GRACE_MS / 1000)}s).`,
+          );
+        } else if (Date.now() - detectedAt >= PAUSE_GRACE_MS) {
+          console.log(`[pause] #${issueNumber}: grace elapsed — aborting the running session.`);
+          this.deps.runner.requestPause();
+        }
+      })();
+    }, PAUSE_POLL_MS);
+    if (typeof timer.unref === "function") timer.unref();
+
+    try {
+      return await fn();
+    } catch (e) {
+      if (e instanceof PauseError) {
+        this.narrate(issueNumber, "Paused by operator — committing in-flight work and stopping.");
+        await this.commitPausedWork(issueNumber);
+      }
+      throw e;
+    } finally {
+      clearInterval(timer);
+      this.pausedIssues.delete(issueNumber);
+      this.deps.runner.clearPause();
+    }
+  }
+
+  /** Throw if this case has been paused, to unwind at a safe phase boundary. Cheap
+   *  (reads the watcher's set) so it can guard every session without an HTTP call. */
+  private throwIfPaused(issueNumber: number): void {
+    if (this.pausedIssues.has(issueNumber)) throw new PauseError();
+  }
+
+  /**
+   * Commit whatever each of the case's repo worktrees currently holds, so a
+   * force-aborted session's work is preserved on its branch (a resume then
+   * continues from it via `priorWorkSummary`). Best-effort per repo; a clean
+   * worktree (the graceful path — the session already committed) is a no-op.
+   */
+  private async commitPausedWork(issueNumber: number): Promise<void> {
+    let tasks: RepoTaskRow[];
+    try {
+      tasks = await this.deps.state.getRepoTasks(issueNumber);
+    } catch (e) {
+      console.error(`[pause] #${issueNumber}: could not load repo tasks to commit paused work:`, String(e));
+      return;
+    }
+    for (const task of tasks) {
+      if (!task.branch) continue;
+      const repo = findRepo(this.deps.config.reposDir, task.repoKey);
+      if (!repo) continue;
+      if (commitWorktree(repo, task.branch, `WIP: paused by operator (#${issueNumber})`)) {
+        this.narrate(issueNumber, `Committed in-flight work in "${task.repoKey}" before pausing.`);
+      }
+    }
+  }
+
+  /**
+   * Record a granular activity step (triage/implement/test/review) on the case's
+   * central timeline the moment that work starts. This is the internal, maintainer-
+   * facing journal — it never changes the customer status (the app still shows a
+   * single "in progress" throughout). Best-effort: the timeline is informational,
+   * so a failed post is logged and swallowed rather than sinking the tick. Central
+   * collapses consecutive duplicates, so a per-tick re-drive of the same phase
+   * doesn't clutter the timeline.
+   */
+  private async recordActivity(
+    issueNumber: number,
+    kind: "triage" | "implement" | "test" | "review",
+    repoKey: string | null = null,
+  ): Promise<void> {
+    try {
+      await this.deps.state.recordEvent(issueNumber, kind, repoKey);
+    } catch (e) {
+      console.warn(
+        `[timeline] #${issueNumber} could not record "${kind}"${repoKey ? ` (${repoKey})` : ""}:`,
+        String(e),
+      );
+    }
   }
 
   /** USD still available in this case's budget envelope (never negative). */
@@ -177,13 +335,13 @@ export class Pipeline {
     // Anchor for the /retry trigger: only a command posted AFTER this comment
     // re-arms the case (so old history can't re-fire it).
     const anchorId = this.deps.github.lastCommentId(issue.number) ?? null;
-    // Always leave a customer-readable account of what happened under "Hur det
-    // löstes" — here: the bot did some work but couldn't finish autonomously and
-    // handed the case to a person, with the reason why.
+    // Always leave a readable account of what happened under "how it was solved"
+    // — here: the bot did some work but couldn't finish autonomously and handed
+    // the case to a person, with the reason why.
     await this.setPhase(issue.number, "NEEDS_HUMAN", {
       error: message,
       needsHumanCommentId: anchorId,
-      solutionSummary: `Kunde inte lösas automatiskt och har lämnats över till en människa för fortsatt hantering. Orsak: ${message}`,
+      solutionSummary: `Could not be resolved automatically and was handed over to a person for further handling. Reason: ${message}`,
     });
   }
 
@@ -376,6 +534,14 @@ export class Pipeline {
    * than re-closed won't-fix.
    */
   async processCase(issue: IssueDetail, row: CaseRow, triageOverride?: string): Promise<void> {
+    // Under a pause watcher: if an operator pauses the case mid-run, the current
+    // session finishes (grace) or is aborted, its work is committed, and a
+    // PauseError propagates to the tick — leaving the case where it is to resume.
+    return this.withPauseWatch(issue.number, () => this.processCaseInner(issue, row, triageOverride));
+  }
+
+  private async processCaseInner(issue: IssueDetail, row: CaseRow, triageOverride?: string): Promise<void> {
+    this.throwIfPaused(issue.number);
     // Announce the pickup to the customer + timeline before doing any work.
     if (row.phase === "NEW") await this.markPickedUp(issue);
 
@@ -403,11 +569,12 @@ export class Pipeline {
     for (const task of await this.orderedTasks(issue.number)) {
       if (REPO_TERMINAL.includes(task.phase)) continue;
       if (task.phase === "BLOCKED") continue; // resumed separately on human reply
+      this.throwIfPaused(issue.number);
       try {
         await this.driveRepoTask(issue, (await this.deps.state.getRepoTask(issue.number, task.repoKey))!);
       } catch (e) {
-        // Operator shutdown: unwind without flagging needs-human or posting.
-        if (e instanceof ShutdownError) throw e;
+        // Operator shutdown / pause: unwind without flagging needs-human or posting.
+        if (e instanceof ShutdownError || e instanceof PauseError) throw e;
         // A hard error on one repo shouldn't sink the others; flag it and move on.
         await this.needsHumanRepo(issue, task, `Error while working this repo: ${String(e)}`);
       }
@@ -483,7 +650,10 @@ export class Pipeline {
    * the case (won't-fix / needs-human). Returns false if it terminated.
    */
   private async triageAndPlan(issue: IssueDetail, override?: string): Promise<boolean> {
+    this.throwIfPaused(issue.number);
     this.narrate(issue.number, `Investigating "${issue.title}"…`);
+    // Timeline: the agent has entered triage (case-level, no repo yet).
+    await this.recordActivity(issue.number, "triage");
     const reposDir = this.deps.config.reposDir;
     const available = discoverRepos(reposDir).map((r) => r.key);
     const result = await triage(
@@ -516,13 +686,13 @@ export class Pipeline {
       // Anchor the @-mention re-arm trigger to AFTER this close comment, so an old
       // mention in the history can't re-open the case (mirrors the /retry anchor).
       const anchorId = this.deps.github.lastCommentId(issue.number) ?? null;
-      // Record WHY it was rejected under "Hur det löstes" so the customer always
-      // gets an explanation, not a blank field. `reason` is the agent's
+      // Record WHY it was rejected under "how it was solved" so the customer
+      // always gets an explanation, not a blank field. `reason` is the agent's
       // customer-facing rationale (also posted as the close comment above).
       await this.setPhase(issue.number, "WONTFIX", {
         error: result.reason,
         needsHumanCommentId: anchorId,
-        solutionSummary: `Ärendet bedömdes inte kräva någon kodändring och avvisades. Motivering: ${result.reason}`,
+        solutionSummary: `This case was assessed as not requiring a code change and was declined. Reason: ${result.reason}`,
       });
       return false;
     }
@@ -536,9 +706,15 @@ export class Pipeline {
       return false;
     }
 
-    const slug = slugify(issue.title);
-    const branch = `features/${issue.number}-${slug}`;
-    await this.setPhase(issue.number, "WORKING", { slug, title: issue.title });
+    // Branch folder + slug come from triage's classification and English slug —
+    // e.g. `bugfix/30-incorrect-case-title-in-support-list`. All repos in the case
+    // share the one branch name.
+    const branch = branchName(issue.number, result.changeKind, result.branchSlug);
+    this.narrate(
+      issue.number,
+      `Classified as ${result.changeKind} — branch "${branch}".`,
+    );
+    await this.setPhase(issue.number, "WORKING", { slug: result.branchSlug, title: issue.title });
 
     // One workable sub-task per present repo…
     for (const t of result.repos) {
@@ -587,72 +763,82 @@ export class Pipeline {
    * Returns true if anything was recovered (triage is then skipped).
    */
   private async recoverExistingWork(issue: IssueDetail): Promise<boolean> {
-    const slug = slugify(issue.title);
-    const branch = `features/${issue.number}-${slug}`;
     let recovered = false;
+    let recoveredSlug: string | null = null;
 
     for (const repo of discoverRepos(this.deps.config.reposDir)) {
       const base = defaultBranch(repo);
 
-      // 1) Local signals — no network.
-      const committed = localBranchExists(repo, branch) && commitsAhead(repo, branch, base) > 0;
-      const dirty = isWorktreeDirty(repo, branch);
+      // The branch's prefix + slug were chosen by a prior triage and aren't
+      // reconstructable after a journal wipe, so we find it by issue number
+      // (`<prefix>/<n>-<slug>`, any prefix — including legacy `features/`).
+      const branch = findIssueBranch(repo, issue.number);
 
-      if (committed && !dirty) {
-        this.narrate(
-          issue.number,
-          `Found an existing branch "${branch}" in "${repo.key}" with committed work but no local PR record — resuming a crashed attempt: will verify, test, and open a PR.`,
-        );
-        // ensureRepoTask no-ops if the row already exists, so an original triage
-        // scope survives. On a wiped journal it creates a row with no scope — the
-        // resuming agent leans on the issue + the prior-work git summary instead
-        // of a meaningless "(recovered…)" placeholder.
-        await this.deps.state.ensureRepoTask(issue.number, repo.key, { branch });
-        await this.setRepoPhase(issue.number, repo.key, "TEST");
-        recovered = true;
-        continue;
-      }
-      if (committed || dirty) {
-        // Uncommitted (or mixed) changes in an existing worktree → DON'T discard
-        // them and start over. Resume implementation so the agent finishes and
-        // commits what's there, then it flows on to test/review/PR.
-        this.narrate(
-          issue.number,
-          `Found an existing worktree for "${repo.key}" with in-progress (uncommitted) changes — resuming the fix instead of starting over.`,
-        );
-        await this.deps.state.ensureRepoTask(issue.number, repo.key, { branch });
-        await this.setRepoPhase(issue.number, repo.key, "IMPLEMENT", { branch });
-        recovered = true;
-        continue;
-      }
-      if (hasWorktree(repo, branch)) {
-        // An empty/clean leftover worktree — nothing to resume, but log it so the
-        // restart isn't silent (it will be reset cleanly before fresh work).
-        this.narrate(
-          issue.number,
-          `Found an empty leftover worktree for "${repo.key}" (no commits, no changes) — will reset it and start fresh.`,
-        );
-        continue;
+      if (branch) {
+        // 1) Local signals — no network.
+        const committed = localBranchExists(repo, branch) && commitsAhead(repo, branch, base) > 0;
+        const dirty = isWorktreeDirty(repo, branch);
+
+        if (committed && !dirty) {
+          this.narrate(
+            issue.number,
+            `Found an existing branch "${branch}" in "${repo.key}" with committed work but no local PR record — resuming a crashed attempt: will verify, test, and open a PR.`,
+          );
+          // ensureRepoTask no-ops if the row already exists, so an original triage
+          // scope survives. On a wiped journal it creates a row with no scope — the
+          // resuming agent leans on the issue + the prior-work git summary instead
+          // of a meaningless "(recovered…)" placeholder.
+          await this.deps.state.ensureRepoTask(issue.number, repo.key, { branch });
+          await this.setRepoPhase(issue.number, repo.key, "TEST");
+          recovered = true;
+          recoveredSlug ??= slugFromBranch(branch);
+          continue;
+        }
+        if (committed || dirty) {
+          // Uncommitted (or mixed) changes in an existing worktree → DON'T discard
+          // them and start over. Resume implementation so the agent finishes and
+          // commits what's there, then it flows on to test/review/PR.
+          this.narrate(
+            issue.number,
+            `Found an existing worktree for "${repo.key}" with in-progress (uncommitted) changes — resuming the fix instead of starting over.`,
+          );
+          await this.deps.state.ensureRepoTask(issue.number, repo.key, { branch });
+          await this.setRepoPhase(issue.number, repo.key, "IMPLEMENT", { branch });
+          recovered = true;
+          recoveredSlug ??= slugFromBranch(branch);
+          continue;
+        }
+        if (hasWorktree(repo, branch)) {
+          // An empty/clean leftover worktree — nothing to resume, but log it so the
+          // restart isn't silent (it will be reset cleanly before fresh work).
+          this.narrate(
+            issue.number,
+            `Found an empty leftover worktree for "${repo.key}" (no commits, no changes) — will reset it and start fresh.`,
+          );
+          continue;
+        }
       }
 
-      // 2) No local trace — only NOW ask GitHub whether a finished run already
-      //    opened a PR for this issue (worktree since cleaned up).
-      const pr = findExistingPr(this.deps.config, repo, branch);
+      // 2) No usable local branch — only NOW ask GitHub whether a finished run
+      //    already opened a PR for this issue (worktree since cleaned up). Matched
+      //    by issue number since the branch name isn't known locally.
+      const pr = findExistingPrForIssue(this.deps.config, repo, issue.number);
       if (pr && (pr.state === "open" || pr.state === "merged")) {
         this.narrate(
           issue.number,
           `No local work, but found an existing ${pr.state} PR for "${repo.key}" (${pr.url}) — assuming the work is done; updating the journal without re-checking.`,
         );
-        await this.deps.state.ensureRepoTask(issue.number, repo.key, { branch });
+        await this.deps.state.ensureRepoTask(issue.number, repo.key, { branch: pr.branch ?? branch ?? undefined });
         await this.setRepoPhase(issue.number, repo.key, "DONE", { prUrl: pr.url });
         recovered = true;
+        recoveredSlug ??= pr.branch ? slugFromBranch(pr.branch) : null;
       } else if (pr) {
         // A closed-unmerged PR — don't silently redo or auto-close; flag it.
         this.narrate(
           issue.number,
           `No local work, but found a closed (unmerged) PR for "${repo.key}" (${pr.url}) — leaving this for a human rather than redoing it.`,
         );
-        await this.deps.state.ensureRepoTask(issue.number, repo.key, { branch });
+        await this.deps.state.ensureRepoTask(issue.number, repo.key, { branch: pr.branch ?? branch ?? undefined });
         await this.setRepoPhase(issue.number, repo.key, "NEEDS_HUMAN", {
           error: `A previous PR (${pr.url}) was closed without merging.`,
         });
@@ -663,7 +849,7 @@ export class Pipeline {
     if (recovered) {
       // Record the slug/title; the in-progress label + timeline start were already
       // applied at pickup (markPickedUp), so no label write is needed here.
-      await this.setPhase(issue.number, "WORKING", { slug, title: issue.title });
+      await this.setPhase(issue.number, "WORKING", { slug: recoveredSlug, title: issue.title });
     }
     return recovered;
   }
@@ -706,7 +892,12 @@ export class Pipeline {
       return;
     }
     const base = defaultBranch(repo);
-    const branch = task.branch ?? `features/${issue.number}-${slugify(issue.title)}`;
+    // task.branch is set at triage/recovery; the fallbacks only guard a corrupt
+    // row — prefer any existing branch for this issue, else a bugfix default.
+    const branch =
+      task.branch ??
+      findIssueBranch(repo, issue.number) ??
+      `bugfix/${issue.number}-${slugify(issue.title)}`;
     const scope = await this.scopeFor(issue.number, task);
     let phase = task.phase;
 
@@ -722,10 +913,12 @@ export class Pipeline {
     const worktree = ensureWorktree(repo, branch, base);
 
     if (phase === "IMPLEMENT") {
+      this.throwIfPaused(issue.number);
       if (!(await this.linkProviders(issue, task, worktree))) return;
       const budget = await this.budgetRemaining(issue.number);
       if (budget < MIN_SESSION_BUDGET_USD) return this.outOfBudgetRepo(issue, task, "implementation");
       this.narrate(issue.number, `Fixing "${task.repoKey}": ${task.scope ?? ""}`);
+      await this.recordActivity(issue.number, "implement", task.repoKey);
       // Feed any work a prior (crashed/recovered) attempt left on the branch so a
       // fresh session continues it instead of starting blind. Empty for genuinely
       // fresh work (clean worktree off base).
@@ -744,12 +937,14 @@ export class Pipeline {
     }
 
     if (phase === "TEST") {
+      this.throwIfPaused(issue.number);
       // Re-link in case the implement session ran its own `npm install` and
       // dropped the local override — tests must see the sibling's local change.
       if (!(await this.linkProviders(issue, task, worktree))) return;
       const budget = await this.budgetRemaining(issue.number);
       if (budget < MIN_SESSION_BUDGET_USD) return this.outOfBudgetRepo(issue, task, "test verification");
       this.narrate(issue.number, `Running "${task.repoKey}" test suite…`);
+      await this.recordActivity(issue.number, "test", task.repoKey);
       const verdict = await verifyTests(this.deps.runner, worktree, budget);
       await this.charge(issue.number, task.repoKey, verdict.costUsd, `test-verify (${task.repoKey})`);
       // Couldn't confirm pass/fail within budget → can't vouch the fix works.
@@ -767,6 +962,7 @@ export class Pipeline {
         const fixBudget = await this.budgetRemaining(issue.number);
         if (fixBudget < MIN_SESSION_BUDGET_USD) return this.outOfBudgetRepo(issue, task, "implementation");
         this.narrate(issue.number, `Re-working "${task.repoKey}" to make tests pass…`);
+        await this.recordActivity(issue.number, "implement", task.repoKey);
         const fix = await implement(
           this.deps.runner,
           this.deps.config,
@@ -788,10 +984,12 @@ export class Pipeline {
     }
 
     if (phase === "REVIEW") {
+      this.throwIfPaused(issue.number);
       const budget = await this.budgetRemaining(issue.number);
       let reviewResult: ReviewResult | undefined;
       if (budget >= MIN_SESSION_BUDGET_USD) {
         this.narrate(issue.number, `Self-reviewing "${task.repoKey}" (5 perspectives)…`);
+        await this.recordActivity(issue.number, "review", task.repoKey);
         reviewResult = await review(this.deps.runner, worktree, base, budget);
         await this.charge(issue.number, task.repoKey, reviewResult.costUsd, `review (${task.repoKey})`);
       }
@@ -948,8 +1146,8 @@ export class Pipeline {
     const repos = tasks.map((t) => t.repoKey).join(", ");
     const prCount = tasks.filter((t) => t.prUrl).length;
     return (
-      `Åtgärdat i ${repos}. Ändringen levererades i ${prCount} pull request${prCount === 1 ? "" : "s"} ` +
-      `som en människa kan granska och släppa.`
+      `Fixed in ${repos}. The change was delivered in ${prCount} pull request${prCount === 1 ? "" : "s"} ` +
+      `for a person to review and release.`
     );
   }
 

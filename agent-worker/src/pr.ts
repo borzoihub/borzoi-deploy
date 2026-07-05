@@ -19,6 +19,8 @@ export interface ExistingPr {
   url: string;
   /** "open" | "merged" | "closed" (lowercased gh state). */
   state: string;
+  /** The PR's head branch, when discovered via an issue-number lookup. */
+  branch?: string;
 }
 
 /**
@@ -45,6 +47,44 @@ export function findExistingPr(config: Config, repo: Repo, branch: string): Exis
     console.log(
       `[recover] Couldn't query ${slug} for an existing PR (no gh access to that repo?) — ` +
         `skipping PR-based recovery. NOTE: pushing/opening a PR there will also fail until the token has access.`,
+    );
+  }
+  return undefined;
+}
+
+/**
+ * Look for a PR opened for this issue when the local branch name is unknown (e.g.
+ * a finished run whose worktree was cleaned up and whose journal was wiped). The
+ * branch's prefix/slug aren't reconstructable, but its head ref always looks like
+ * `<prefix>/<issueNumber>-<slug>`, so we list the repo's PRs and match the head by
+ * issue number. Prefers an open/merged PR over a closed one. Read-only.
+ */
+export function findExistingPrForIssue(
+  config: Config,
+  repo: Repo,
+  issueNumber: number,
+): ExistingPr | undefined {
+  const slug = repoSlug(repo);
+  if (!slug) return undefined;
+  try {
+    const out = run(
+      "gh",
+      ["pr", "list", "-R", slug, "--state", "all", "--json", "url,state,headRefName", "--limit", "100"],
+      repo.path,
+      config,
+    );
+    const arr = JSON.parse(out) as Array<{ url: string; state: string; headRefName: string }>;
+    // Head ref for this issue: any prefix, then `/<n>-`.
+    const re = new RegExp(`^[^/]+/${issueNumber}-`);
+    const matches = arr
+      .filter((p) => re.test(p.headRefName ?? ""))
+      .map((p) => ({ url: p.url, state: String(p.state).toLowerCase(), branch: p.headRefName }));
+    // Prefer a still-live PR (open/merged) over a closed-unmerged one.
+    return matches.find((m) => m.state === "open" || m.state === "merged") ?? matches[0];
+  } catch {
+    console.log(
+      `[recover] Couldn't query ${slug} for an existing PR by issue #${issueNumber} ` +
+        `(no gh access to that repo?) — skipping PR-based recovery.`,
     );
   }
   return undefined;

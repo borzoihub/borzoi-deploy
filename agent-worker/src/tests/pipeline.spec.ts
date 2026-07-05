@@ -1,5 +1,5 @@
 import { expect } from "chai";
-import { slugify, mentionsBot, feedbackForBot } from "../pipeline.js";
+import { slugify, branchName, slugFromBranch, mentionsBot, feedbackForBot } from "../pipeline.js";
 import { triageSystemPrompt } from "../prompts.js";
 import type { PrComment } from "../github.js";
 
@@ -21,6 +21,32 @@ describe("slugify", () => {
 
   it("falls back to 'fix' when the title has no usable characters", () => {
     expect(slugify("!!! ???")).to.equal("fix");
+  });
+});
+
+describe("branchName", () => {
+  it("files a verified bug under bugfix/, dropping any installation name", () => {
+    expect(branchName(30, "bugfix", "incorrect-case-title-in-support-list")).to.equal(
+      "bugfix/30-incorrect-case-title-in-support-list",
+    );
+  });
+
+  it("maps feature → features/ and improvement → improvements/", () => {
+    expect(branchName(7, "feature", "add-export-button")).to.equal("features/7-add-export-button");
+    expect(branchName(9, "improvement", "clearer-error-copy")).to.equal(
+      "improvements/9-clearer-error-copy",
+    );
+  });
+
+  it("re-slugifies the triage slug as a safety net", () => {
+    expect(branchName(12, "bugfix", "Fel: Ärendetitel!!")).to.equal("bugfix/12-fel-rendetitel");
+  });
+});
+
+describe("slugFromBranch", () => {
+  it("strips the prefix and issue number", () => {
+    expect(slugFromBranch("bugfix/30-incorrect-case-title")).to.equal("incorrect-case-title");
+    expect(slugFromBranch("features/7-add-export-button")).to.equal("add-export-button");
   });
 });
 

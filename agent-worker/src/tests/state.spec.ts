@@ -304,3 +304,33 @@ describe("StateStore — cost accounting", () => {
     expect((await store.get(23))!.costUsd).to.equal(0);
   });
 });
+
+describe("StateStore — worker-activity events", () => {
+  it("recordEvent() POSTs kind + repoKey to the case events endpoint", async () => {
+    const calls: { url: string; method: string; body: unknown }[] = [];
+    const prev = globalThis.fetch;
+    globalThis.fetch = (async (input: unknown, init?: RequestInit) => {
+      calls.push({
+        url: String(input),
+        method: init?.method ?? "GET",
+        body: init?.body ? JSON.parse(String(init.body)) : undefined,
+      });
+      return new Response(JSON.stringify({ issueNumber: 7, repoTasks: [] }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    }) as typeof fetch;
+    try {
+      const store = new StateStore("https://central.test", "tok");
+      await store.recordEvent(7, "test", "borzoi-backend");
+      await store.recordEvent(7, "triage"); // repoKey defaults to null (case-level)
+    } finally {
+      globalThis.fetch = prev;
+    }
+    expect(calls).to.have.length(2);
+    expect(calls[0]!.method).to.equal("POST");
+    expect(calls[0]!.url).to.equal("https://central.test/api/support/agent/cases/7/events");
+    expect(calls[0]!.body).to.deep.equal({ kind: "test", repoKey: "borzoi-backend" });
+    expect(calls[1]!.body).to.deep.equal({ kind: "triage", repoKey: null });
+  });
+});

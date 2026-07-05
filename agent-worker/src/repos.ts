@@ -93,6 +93,30 @@ export function localBranchExists(repo: Repo, branch: string): boolean {
   }
 }
 
+/**
+ * Find a local branch this issue's work was done on, without knowing its exact
+ * name. Branches are `<prefix>/<issueNumber>-<slug>` where the prefix
+ * (bugfix/features/improvements) and slug are chosen by triage and so aren't
+ * reconstructable after a journal wipe — but the issue number always anchors the
+ * segment right after the `/`. Matches any prefix (including legacy `features/`).
+ * Returns the first match, or undefined when none exists.
+ */
+export function findIssueBranch(repo: Repo, issueNumber: number): string | undefined {
+  try {
+    // The trailing "-" after the number keeps issue 3 from matching "30-…".
+    const out = git(repo.path, [
+      "branch",
+      "--list",
+      "--format=%(refname:short)",
+      `*/${issueNumber}-*`,
+    ]);
+    const first = out.split("\n").map((l) => l.trim()).find(Boolean);
+    return first || undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 /** Is there already a worktree checked out for this branch? */
 export function hasWorktree(repo: Repo, branch: string): boolean {
   return existsSync(worktreePath(repo, branch));
@@ -108,6 +132,27 @@ export function isWorktreeDirty(repo: Repo, branch: string): boolean {
   try {
     return git(path, ["status", "--porcelain"]).length > 0;
   } catch {
+    return false;
+  }
+}
+
+/**
+ * Stage + commit everything in the branch's worktree, for the pause path: when
+ * an operator pauses a case we abort the running session and preserve whatever
+ * it produced as a commit on the branch (rather than lose it or leave a dirty
+ * worktree a resume would have to reconcile). No-op returning false when the
+ * worktree is missing or clean; true when a commit was made. Best-effort — a
+ * failure here must not mask the PauseError that triggered it.
+ */
+export function commitWorktree(repo: Repo, branch: string, message: string): boolean {
+  const path = worktreePath(repo, branch);
+  if (!existsSync(path) || !isWorktreeDirty(repo, branch)) return false;
+  try {
+    git(path, ["add", "-A"]);
+    git(path, ["commit", "--no-verify", "-m", message]);
+    return true;
+  } catch (e) {
+    console.error(`[repos] ${repo.key}: could not commit paused work on ${branch}:`, String(e));
     return false;
   }
 }

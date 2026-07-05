@@ -113,10 +113,27 @@ export class ShutdownError extends Error {
   }
 }
 
+/**
+ * Thrown when an in-flight session is aborted because an operator paused the
+ * case (from the installer portal) and the 2-minute grace elapsed. Distinct
+ * from ShutdownError (the worker keeps running — only this case stops) and from
+ * a normal error (the pipeline must NOT flag needs-human): the case is left on
+ * its committed branch to be resumed later.
+ */
+export class PauseError extends Error {
+  constructor(message = "case paused by operator") {
+    super(message);
+    this.name = "PauseError";
+  }
+}
+
 export class ClaudeRunner {
   /** Abort controllers for every in-flight session, so shutdown can cancel them. */
   private readonly active = new Set<AbortController>();
   private shuttingDown = false;
+  /** Set while a pause abort is in flight so the catch classifies the resulting
+   *  AbortError as a PauseError rather than a stall/limit. */
+  private pausing = false;
 
   constructor(private readonly config: Config) {}
 
@@ -130,8 +147,26 @@ export class ClaudeRunner {
     for (const c of this.active) c.abort();
   }
 
+  /**
+   * Abort the in-flight session because its case was paused past the grace
+   * window. Unlike `shutdown`, the worker stays up — only the current session is
+   * cut, surfacing as a PauseError the pipeline catches to commit + stop. The
+   * worker processes one case at a time, so the only active session is this
+   * case's. Cleared with `clearPause()` once the case has unwound.
+   */
+  requestPause(): void {
+    this.pausing = true;
+    for (const c of this.active) c.abort();
+  }
+
+  /** Reset the pause latch after a paused case has unwound (see requestPause). */
+  clearPause(): void {
+    this.pausing = false;
+  }
+
   async run(opts: RunOptions): Promise<RunResult> {
     if (this.shuttingDown) throw new ShutdownError();
+    if (this.pausing) throw new PauseError();
     const abort = new AbortController();
     this.active.add(abort);
     let askHuman: AskHumanHandle | undefined;
@@ -267,6 +302,13 @@ export class ClaudeRunner {
       // distinct error so the pipeline unwinds without flagging needs-human.
       if (this.shuttingDown && e instanceof AbortError) {
         throw new ShutdownError();
+      }
+      // Operator paused this case past the grace window — surface a distinct
+      // error so the pipeline commits the in-flight work and stops (not
+      // needs-human). Checked before the stall/limit branches: a pause abort
+      // must never be misread as a wedged session.
+      if (this.pausing && e instanceof AbortError) {
+        throw new PauseError();
       }
       // ask_human aborts the session deliberately; that is not a failure.
       if (askHuman?.wasAsked() && e instanceof AbortError) {

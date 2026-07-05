@@ -14,10 +14,22 @@ const RepoTargetSchema = z.object({
   scope: z.string(),
 });
 
+/**
+ * How the change is classified, which drives the branch prefix:
+ *  - `bugfix`      → a verified real defect that needs fixing (`bugfix/…`)
+ *  - `feature`     → genuinely new functionality (`features/…`)
+ *  - `improvement` → not a defect, but a betterment over how it works today
+ *                    (`improvements/…`)
+ */
+export const CHANGE_KINDS = ["bugfix", "feature", "improvement"] as const;
+export type ChangeKind = (typeof CHANGE_KINDS)[number];
+
 const TriageSchema = z.object({
   fixable: z.boolean(),
   repos: z.array(RepoTargetSchema),
   reason: z.string(),
+  changeKind: z.enum(CHANGE_KINDS),
+  branchSlug: z.string(),
 });
 
 export interface RepoTarget {
@@ -29,6 +41,14 @@ export interface TriageResult {
   fixable: boolean;
   /** Every repo the fix must touch, validated against what's available. */
   repos: RepoTarget[];
+  /** Change classification, driving the branch prefix (bugfix/features/improvements). */
+  changeKind: ChangeKind;
+  /**
+   * Short English kebab-case slug describing the fix, for the branch name
+   * (`<prefix>/<issue#>-<branchSlug>`). Always English regardless of the report's
+   * language; carries no installation name (that's recoverable from the issue #).
+   */
+  branchSlug: string;
   /**
    * Repos triage named that are NOT yet cloned in REPOS_DIR, with the scope it
    * intended for each — so when the repo later appears, the fix has context.
@@ -84,6 +104,10 @@ export async function triage(
       fixable: false,
       repos: [],
       missingRepos: [],
+      // Defaults are inert here: a limit-hit triage hard-fails to needs-human and
+      // never reaches branch creation, so changeKind/branchSlug are unused.
+      changeKind: "bugfix",
+      branchSlug: "fix",
       reason: "Triage was cut off by the budget/turn ceiling before reaching a verdict.",
       costUsd: result.costUsd,
       limitHit: true,
@@ -121,6 +145,8 @@ export async function triage(
     fixable: parsed.data.fixable,
     repos,
     missingRepos,
+    changeKind: parsed.data.changeKind,
+    branchSlug: parsed.data.branchSlug,
     reason: parsed.data.reason,
     costUsd: result.costUsd,
     limitHit: false,
