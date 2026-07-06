@@ -1301,7 +1301,17 @@ export class Pipeline {
       return;
     }
 
-    if (outstanding.length === 0) return;
+    if (outstanding.length === 0) {
+      // Self-heal: if a *crashed* prior feedback round left this resolved case's
+      // issue reopened + active (the finally below never ran), restore it to
+      // resolved now. Scoped to our own signature — open AND `in-progress` — so a
+      // maintainer's deliberate manual reopen isn't fought.
+      if (issue.state === "open" && issue.labels.includes(LABEL_IN_PROGRESS)) {
+        this.deps.github.closeCompletedQuiet(issue.number);
+        this.narrate(issue.number, `Restored resolved status after an interrupted PR-feedback round.`);
+      }
+      return;
+    }
 
     this.narrate(
       issue.number,
@@ -1310,89 +1320,108 @@ export class Pipeline {
     // React FIRST so the same comments are never acted on twice.
     for (const c of outstanding) this.deps.github.acknowledgeCommand(c.id);
 
-    // A follow-up is an explicit maintainer request — give it a fresh budget
-    // envelope, exactly like /retry (lifetime cost is preserved by addCost).
-    await this.deps.state.update(issue.number, { costUsd: 0 });
+    // Surface the follow-up to the customer: the case is resolved (issue closed),
+    // so reopen it + mark active — `deriveStatus` on central then reports
+    // `in_progress` (→ *Under utredning*) and pushes the reporter, so the app shows
+    // the case working again while we address the feedback. Deliberately customer-
+    // visible (a product choice); the `finally` below restores resolved/"Klar" when
+    // the round ends, whatever its outcome. Idempotent if already open+active.
+    this.deps.github.reopenIssue(issue.number);
+    this.deps.github.addLabel(issue.number, LABEL_IN_PROGRESS);
+    this.narrate(issue.number, `Reopened + marked active while addressing PR feedback on "${task.repoKey}".`);
 
-    const base = defaultBranch(repo);
-    const scope = await this.scopeFor(issue.number, task);
-    // Reopen the PR branch at its remote tip (the worktree was reclaimed on close).
-    const worktree = syncWorktreeToRemoteBranch(repo, task.branch);
+    try {
+      // A follow-up is an explicit maintainer request — give it a fresh budget
+      // envelope, exactly like /retry (lifetime cost is preserved by addCost).
+      await this.deps.state.update(issue.number, { costUsd: 0 });
 
-    let attempts = 0;
-    let pushed = false;
-    let lastSummary = "";
-    while (attempts < this.deps.config.maxTestAttempts) {
-      attempts++;
-      const budget = await this.budgetRemaining(issue.number);
-      if (budget < MIN_SESSION_BUDGET_USD) {
+      const base = defaultBranch(repo);
+      const scope = await this.scopeFor(issue.number, task);
+      // Reopen the PR branch at its remote tip (the worktree was reclaimed on close).
+      const worktree = syncWorktreeToRemoteBranch(repo, task.branch);
+
+      let attempts = 0;
+      let pushed = false;
+      let lastSummary = "";
+      while (attempts < this.deps.config.maxTestAttempts) {
+        attempts++;
+        const budget = await this.budgetRemaining(issue.number);
+        if (budget < MIN_SESSION_BUDGET_USD) {
+          this.deps.github.replyOnPr(
+            slug,
+            prNumber,
+            `🤖 I started on this feedback but hit the $${this.deps.config.maxBudgetPerCaseUsd.toFixed(0)} ` +
+              "per-case budget before finishing. Leaving it for a maintainer.",
+          );
+          break;
+        }
+        const result = await addressPrFeedback(
+          this.deps.runner,
+          this.deps.config,
+          issue,
+          worktree,
+          budget,
+          outstanding,
+          base,
+          scope,
+        );
+        await this.charge(issue.number, task.repoKey, result.costUsd, `pr-feedback (${task.repoKey})`);
+        if (result.limitHit || result.isError) {
+          this.deps.github.replyOnPr(
+            slug,
+            prNumber,
+            "🤖 I couldn't complete this feedback automatically " +
+              `(${result.limitHit ? "ran out of budget" : "the session errored"}). Leaving it for a maintainer.`,
+          );
+          break;
+        }
+        lastSummary = result.text.trim();
+
+        const verdict = await verifyTests(this.deps.runner, worktree, await this.budgetRemaining(issue.number));
+        await this.charge(issue.number, task.repoKey, verdict.costUsd, `pr-feedback-test (${task.repoKey})`);
+        if (verdict.passed) {
+          pushBranch(this.deps.config, worktree, task.branch);
+          pushed = true;
+          break;
+        }
+        this.narrate(
+          issue.number,
+          `PR-feedback tests for "${task.repoKey}" failed (attempt ${attempts}/${this.deps.config.maxTestAttempts}): ${verdict.summary}`,
+        );
+        if (verdict.limitHit) {
+          this.deps.github.replyOnPr(
+            slug,
+            prNumber,
+            "🤖 I made the change but couldn't confirm the tests within budget. Leaving it for a maintainer.",
+          );
+          break;
+        }
+      }
+
+      if (pushed) {
         this.deps.github.replyOnPr(
           slug,
           prNumber,
-          `🤖 I started on this feedback but hit the $${this.deps.config.maxBudgetPerCaseUsd.toFixed(0)} ` +
-            "per-case budget before finishing. Leaving it for a maintainer.",
+          `🤖 Done — pushed an update to this PR addressing the feedback.${lastSummary ? `\n\n${lastSummary}` : ""}`,
         );
-        break;
-      }
-      const result = await addressPrFeedback(
-        this.deps.runner,
-        this.deps.config,
-        issue,
-        worktree,
-        budget,
-        outstanding,
-        scope,
-      );
-      await this.charge(issue.number, task.repoKey, result.costUsd, `pr-feedback (${task.repoKey})`);
-      if (result.limitHit || result.isError) {
+        this.narrate(issue.number, `PR feedback on "${task.repoKey}" addressed and pushed.`);
+      } else if (attempts >= this.deps.config.maxTestAttempts) {
         this.deps.github.replyOnPr(
           slug,
           prNumber,
-          "🤖 I couldn't complete this feedback automatically " +
-            `(${result.limitHit ? "ran out of budget" : "the session errored"}). Leaving it for a maintainer.`,
+          `🤖 I attempted the requested change but couldn't get the tests passing after ` +
+            `${attempts} attempts. Leaving it for a maintainer.`,
         );
-        break;
       }
-      lastSummary = result.text.trim();
 
-      const verdict = await verifyTests(this.deps.runner, worktree, await this.budgetRemaining(issue.number));
-      await this.charge(issue.number, task.repoKey, verdict.costUsd, `pr-feedback-test (${task.repoKey})`);
-      if (verdict.passed) {
-        pushBranch(this.deps.config, worktree, task.branch);
-        pushed = true;
-        break;
-      }
-      this.narrate(
-        issue.number,
-        `PR-feedback tests for "${task.repoKey}" failed (attempt ${attempts}/${this.deps.config.maxTestAttempts}): ${verdict.summary}`,
-      );
-      if (verdict.limitHit) {
-        this.deps.github.replyOnPr(
-          slug,
-          prNumber,
-          "🤖 I made the change but couldn't confirm the tests within budget. Leaving it for a maintainer.",
-        );
-        break;
-      }
+      // Reclaim the worktree disk; the branch (and PR) live on.
+      removeWorktree(repo, task.branch);
+    } finally {
+      // Restore the resolved ("Klar") status once the round ends — whether it
+      // shipped, gave up to a maintainer, or threw. The case row stays DONE
+      // throughout (we only touched GitHub state), so the PR stays watched.
+      this.deps.github.closeCompletedQuiet(issue.number);
+      this.narrate(issue.number, `Restored resolved status for #${issue.number} after PR feedback.`);
     }
-
-    if (pushed) {
-      this.deps.github.replyOnPr(
-        slug,
-        prNumber,
-        `🤖 Done — pushed an update to this PR addressing the feedback.${lastSummary ? `\n\n${lastSummary}` : ""}`,
-      );
-      this.narrate(issue.number, `PR feedback on "${task.repoKey}" addressed and pushed.`);
-    } else if (attempts >= this.deps.config.maxTestAttempts) {
-      this.deps.github.replyOnPr(
-        slug,
-        prNumber,
-        `🤖 I attempted the requested change but couldn't get the tests passing after ` +
-          `${attempts} attempts. Leaving it for a maintainer.`,
-      );
-    }
-
-    // Reclaim the worktree disk; the branch (and PR) live on.
-    removeWorktree(repo, task.branch);
   }
 }

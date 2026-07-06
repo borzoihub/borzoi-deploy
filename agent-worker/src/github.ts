@@ -305,6 +305,29 @@ export class GitHub {
   }
 
   /**
+   * Re-close an already-resolved issue that was temporarily reopened → back to
+   * the resolved ("Löst" / "Klar") state, WITHOUT posting a fresh resolution
+   * comment. Used to restore a
+   * DONE case's status after a PR-feedback round that reopened + re-activated the
+   * issue so the customer could see it go "Under utredning" while the bot worked.
+   * The maintainer-facing detail already went to the PR thread, so re-commenting
+   * on the issue each round would only clutter it — the status flip (and its push)
+   * is the whole signal. Removing `in-progress` first is required for
+   * `deriveStatus` to land on `resolved`.
+   */
+  closeCompletedQuiet(number: number): void {
+    this.removeLabel(number, LABEL_IN_PROGRESS);
+    this.ghMutate([
+      "issue",
+      "close",
+      String(number),
+      ...this.repoArgs(),
+      "--reason",
+      "completed",
+    ]);
+  }
+
+  /**
    * Reopen a closed issue — e.g. a maintainer overriding a won't-fix close by
    * telling the bot to look at it anyway. The customer sees it move back to an
    * open ("under investigation") state once work restarts.

@@ -66,9 +66,11 @@ export async function implement(
 /**
  * Address maintainer feedback on an already-open PR, inside a worktree synced to
  * the PR's branch. Mirrors `implement` but for a post-completion follow-up: it
- * makes the smallest change satisfying the feedback, updates tests, and commits.
- * `ask_human` is intentionally DISABLED — there is no open issue thread to park a
- * question on, and the maintainer reviewing the PR is the human in the loop.
+ * first merges the default branch (`base`) into the PR branch and resolves any
+ * conflicts so the PR isn't left behind main, then makes the smallest change
+ * satisfying the feedback, updates tests, and commits. `ask_human` is
+ * intentionally DISABLED — there is no open issue thread to park a question on,
+ * and the maintainer reviewing the PR is the human in the loop.
  */
 export async function addressPrFeedback(
   runner: ClaudeRunner,
@@ -77,12 +79,13 @@ export async function addressPrFeedback(
   worktreePath: string,
   budgetUsd: number,
   feedback: PrComment[],
+  base: string,
   scope?: RepoScope,
 ): Promise<RunResult> {
   return runner.run({
     label: `pr-feedback #${issue.number}${scope ? ` (${scope.repoKey})` : ""}`,
     cwd: worktreePath,
-    systemPrompt: prFeedbackSystemPrompt(issue, scope, feedback),
+    systemPrompt: prFeedbackSystemPrompt(issue, scope, feedback, base),
     prompt: prFeedbackPrompt(),
     maxTurns: config.maxImplementTurns,
     maxBudgetUsd: budgetUsd,

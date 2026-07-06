@@ -1,7 +1,7 @@
 import { expect } from "chai";
 import { slugify, branchName, slugFromBranch, mentionsBot, feedbackForBot } from "../pipeline.js";
-import { triageSystemPrompt } from "../prompts.js";
-import type { PrComment } from "../github.js";
+import { triageSystemPrompt, prFeedbackSystemPrompt } from "../prompts.js";
+import type { PrComment, IssueDetail } from "../github.js";
 
 describe("slugify", () => {
   it("produces a branch-safe slug from a case title", () => {
@@ -115,5 +115,36 @@ describe("triageSystemPrompt", () => {
   it("quotes a multi-line instruction across every line", () => {
     const prompt = triageSystemPrompt(["borzoi-backend"], "line one\nline two");
     expect(prompt).to.include("> line one\n> line two");
+  });
+});
+
+describe("prFeedbackSystemPrompt", () => {
+  const issue: IssueDetail = {
+    number: 42,
+    title: "Wrong label",
+    labels: [],
+    state: "closed",
+    body: "The button says the wrong thing.",
+    comments: [],
+  };
+  const feedback: PrComment[] = [
+    { id: "c1", author: "maint", body: "@voltini-bot tweak the copy", kind: "conversation" },
+  ];
+
+  it("instructs the session to merge the default branch and resolve conflicts first", () => {
+    const prompt = prFeedbackSystemPrompt(issue, undefined, feedback, "main");
+    // The base branch is named in the merge commands.
+    expect(prompt).to.include("git merge origin/main");
+    expect(prompt).to.include("git fetch origin main");
+    // Conflicts must be resolved, never left as markers or aborted.
+    expect(prompt).to.match(/resolve/i);
+    expect(prompt).to.match(/never .*merge --abort/i);
+    expect(prompt).to.include("<<<<<<<");
+  });
+
+  it("uses whatever base branch it is given", () => {
+    const prompt = prFeedbackSystemPrompt(issue, undefined, feedback, "develop");
+    expect(prompt).to.include("git merge origin/develop");
+    expect(prompt).to.not.include("git merge origin/main");
   });
 });

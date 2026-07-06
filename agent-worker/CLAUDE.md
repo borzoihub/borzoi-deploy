@@ -128,11 +128,19 @@ the session proceeds without live data rather than parking the case.
 After a case is DONE, each tick also watches its opened PR(s) for a maintainer
 comment that **@-mentions the bot** (`BOT_GH_LOGIN`) — top-level *or* inline on
 the diff. On finding one, the bot reopens a session on the PR branch
-(`syncWorktreeToRemoteBranch`), makes the requested change, runs tests, pushes to
-the **existing** PR branch, and replies on the PR. The support issue stays
-**closed** — this is a developer-side refinement, so the customer is not
-re-notified. Gates and safety:
+(`syncWorktreeToRemoteBranch`), **merges the default branch and resolves any
+conflicts first** (so the PR isn't left behind main), makes the requested change,
+runs tests, pushes to the **existing** PR branch, and replies on the PR. Gates and
+safety:
 
+- **Customer-visible status.** While a feedback round is in flight the bot
+  **reopens the issue + adds `in-progress`** so the app shows *Under utredning*
+  again, and restores it to resolved/*Löst* ("Klar") in a `finally` when the round
+  ends (shipped, given up, or errored) — the case row stays `DONE` throughout, so
+  the PR keeps being watched. This **does** re-notify the customer (a deliberate
+  product choice: a PR-feedback round is visible), unlike the read-only live-data
+  queries. A crashed round that skips the `finally` self-heals: the next tick,
+  finding the issue open + `in-progress` with no outstanding comments, re-closes it.
 - **Trigger** is the @-mention; ordinary review chatter is ignored.
 - **Authorization:** write/maintain/admin on the *code repo where the PR lives*
   (`isAuthorizedMaintainer(login, codeRepoSlug)`) — customers can't trigger it.
