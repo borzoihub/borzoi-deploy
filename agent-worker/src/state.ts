@@ -74,6 +74,19 @@ export interface CaseRow {
    * worker only reads it.
    */
   paused: boolean;
+  /**
+   * Per-case notional USD budget override (portal-authored advanced cases).
+   * When set, the resolver measures spend against THIS instead of the global
+   * `config.maxBudgetPerCaseUsd`. `null` for every app case and simple portal
+   * case (use the global cap). Central owns it; the worker only reads it.
+   */
+  budgetUsd: number | null;
+  /**
+   * Plan-first flag (portal-authored advanced cases): the case wants the
+   * resolver to triage + post a plan and pause for review before implementing.
+   * `false` for every other case.
+   */
+  planOnly: boolean;
   updatedAt: string;
 }
 
@@ -125,6 +138,8 @@ interface CaseDto {
   needsHumanCommentId: string | null;
   solutionSummary: string | null;
   paused: boolean;
+  budgetUsd: number | null;
+  planOnly: boolean;
   updatedAt: string | null;
   repoTasks: RepoTaskDto[];
 }
@@ -166,6 +181,8 @@ function toCaseRow(dto: CaseDto): CaseRow {
     needsHumanCommentId: dto.needsHumanCommentId,
     solutionSummary: dto.solutionSummary,
     paused: !!dto.paused,
+    budgetUsd: dto.budgetUsd ?? null,
+    planOnly: !!dto.planOnly,
     updatedAt: dto.updatedAt ?? "",
   };
 }

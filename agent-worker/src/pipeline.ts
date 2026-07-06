@@ -282,10 +282,22 @@ export class Pipeline {
     }
   }
 
+  /**
+   * The spend ceiling for a case: its per-case `budgetUsd` override when set
+   * (portal-authored advanced cases), otherwise the global
+   * `config.maxBudgetPerCaseUsd`. Portal simple cases and every app case carry
+   * no override, so they fall through to the global cap. `row` may be passed to
+   * avoid a redundant fetch when the caller already has it.
+   */
+  private effectiveBudget(row: CaseRow | undefined): number {
+    return row?.budgetUsd ?? this.deps.config.maxBudgetPerCaseUsd;
+  }
+
   /** USD still available in this case's budget envelope (never negative). */
   private async budgetRemaining(issueNumber: number): Promise<number> {
-    const spent = (await this.deps.state.get(issueNumber))?.costUsd ?? 0;
-    return Math.max(0, this.deps.config.maxBudgetPerCaseUsd - spent);
+    const row = await this.deps.state.get(issueNumber);
+    const spent = row?.costUsd ?? 0;
+    return Math.max(0, this.effectiveBudget(row) - spent);
   }
 
   /**
@@ -302,8 +314,11 @@ export class Pipeline {
     label: string,
   ): Promise<void> {
     const spent = await this.deps.state.addCost(issueNumber, repoKey, costUsd);
+    // Log against the case's effective cap (its override, else the global) so the
+    // "$spent / $budget" line reflects the envelope actually in force.
+    const cap = this.effectiveBudget(await this.deps.state.get(issueNumber));
     console.log(
-      `[cost] #${issueNumber} ${label}: +$${costUsd.toFixed(4)} → $${spent.toFixed(2)} / $${this.deps.config.maxBudgetPerCaseUsd.toFixed(2)} this case`,
+      `[cost] #${issueNumber} ${label}: +$${costUsd.toFixed(4)} → $${spent.toFixed(2)} / $${cap.toFixed(2)} this case`,
     );
   }
 
@@ -575,6 +590,16 @@ export class Pipeline {
       if (!recovered) {
         const planned = await this.triageAndPlan(issue, triageOverride);
         if (!planned) return; // terminal (wontfix / needs-human) already handled
+        // Plan-first review gate: a portal-authored `planOnly` case posts its
+        // plan and parks for human approval BEFORE implementing. Only reached on
+        // a fresh triage (not on the post-approval re-drive, which enters with
+        // repo tasks already present and skips this whole block), so it never
+        // re-fires. Approval is a human reply on the issue (see resumeIfReplied).
+        const plannedCase = await this.deps.state.get(issue.number);
+        if (plannedCase?.planOnly) {
+          await this.postPlanForReview(issue);
+          return;
+        }
       }
     }
 
@@ -1179,9 +1204,59 @@ export class Pipeline {
     );
   }
 
+  /**
+   * Post a portal-authored `planOnly` case's plan and park the whole case for
+   * human review. The plan is the per-repo triage scopes, rendered as a
+   * checklist. The case goes BLOCKED with the plan comment as its resume anchor
+   * (`needsHumanCommentId`); a human reply on the issue approves it (see
+   * `resumeIfReplied`). Unlike a repo-sub-task block there is no Agent SDK
+   * session to resume — approval simply lets the existing BRANCH tasks proceed
+   * into implementation.
+   */
+  private async postPlanForReview(issue: IssueDetail): Promise<void> {
+    const tasks = await this.deps.state.getRepoTasks(issue.number);
+    const planLines = tasks.length
+      ? tasks.map((t) => `- **${t.repoKey}** — ${t.scope ?? "(scope to be detailed during implementation)"}`)
+      : ["- (no repositories identified during triage)"];
+    const body =
+      "### Proposed plan (awaiting review)\n\n" +
+      "This case was filed **plan-first** from the installer portal, so I've stopped " +
+      "after triage to let a maintainer review the plan before I write any code:\n\n" +
+      planLines.join("\n") +
+      "\n\n**Reply on this issue to approve** — I'll then implement the plan across the " +
+      "repos above. Reply with changes instead to adjust the scope. I'm parked until a " +
+      "maintainer replies here.";
+    this.deps.github.comment(issue.number, body);
+    const anchor = this.deps.github.lastCommentId(issue.number) ?? null;
+    await this.setPhase(issue.number, "BLOCKED", { needsHumanCommentId: anchor });
+    this.narrate(issue.number, "Plan-first case — posted the plan and parked for review.");
+  }
+
   /** Continue parked sub-tasks once a human has replied to their question(s). */
-  async resumeIfReplied(issue: IssueDetail, _row: CaseRow): Promise<void> {
-    const blocked = (await this.deps.state.getRepoTasks(issue.number)).filter((t) => t.phase === "BLOCKED");
+  async resumeIfReplied(issue: IssueDetail, row: CaseRow): Promise<void> {
+    const repoTasks = await this.deps.state.getRepoTasks(issue.number);
+
+    // Plan-first review gate: the whole case is parked awaiting plan approval —
+    // no repo sub-task is BLOCKED (they're all still BRANCH), the case carries
+    // `planOnly`, and the plan comment is its resume anchor. A human reply after
+    // that comment approves the plan; we then drop to WORKING and let the normal
+    // implement loop drive the BRANCH tasks. (The portal's own resume-comment is
+    // bot-authored and deliberately does NOT count — approval must be a human.)
+    if (
+      row.planOnly &&
+      row.phase === "BLOCKED" &&
+      row.needsHumanCommentId &&
+      !repoTasks.some((t) => t.phase === "BLOCKED")
+    ) {
+      const reply = this.deps.github.humanReplyAfter(issue.number, row.needsHumanCommentId);
+      if (!reply) return; // still awaiting approval
+      this.narrate(issue.number, "Plan approved by a maintainer — starting implementation…");
+      await this.setPhase(issue.number, "WORKING", { needsHumanCommentId: null });
+      await this.processCase(issue, (await this.deps.state.get(issue.number))!);
+      return;
+    }
+
+    const blocked = repoTasks.filter((t) => t.phase === "BLOCKED");
     if (blocked.length === 0) return;
 
     let resumedAny = false;
