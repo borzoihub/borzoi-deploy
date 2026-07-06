@@ -9,6 +9,7 @@ import {
   defaultBranch,
   ensureWorktree,
   freshWorktree,
+  mergeBaseIntoWorktree,
   removeWorktree,
   syncWorktreeToRemoteBranch,
   localBranchExists,
@@ -965,6 +966,33 @@ export class Pipeline {
 
     const worktree = ensureWorktree(repo, branch, base);
 
+    // Always continue on top of the latest default branch. Whenever we pick up an
+    // EXISTING branch to carry on — a crashed/committed attempt recovered at
+    // TEST/REVIEW, or a case resumed at a persisted phase after a pause/restart —
+    // merge the latest <base> in first, so tests, review and the eventual PR
+    // reflect current main, not a stale base. Genuinely fresh work (phase===BRANCH)
+    // was just created off origin/<base> by freshWorktree and needs no merge. A
+    // dirty worktree (uncommitted work from a crashed IMPLEMENT) is skipped here
+    // and brought up to date by the implement session itself (see priorWorkBlock);
+    // an unresolvable conflict on a clean branch hands off to a human.
+    if (task.phase !== "BRANCH") {
+      const merge = mergeBaseIntoWorktree(repo, branch, base);
+      if (merge === "conflict") {
+        return this.needsHumanRepo(
+          issue,
+          task,
+          `Could not automatically merge the latest \`${base}\` into branch \`${branch}\` before continuing — ` +
+            `there are merge conflicts a maintainer needs to resolve.`,
+        );
+      }
+      if (merge === "merged") {
+        this.narrate(
+          issue.number,
+          `Merged latest \`${base}\` into "${task.repoKey}" branch \`${branch}\` before continuing.`,
+        );
+      }
+    }
+
     if (phase === "IMPLEMENT") {
       this.throwIfPaused(issue.number);
       if (!(await this.linkProviders(issue, task, worktree))) return;
@@ -976,7 +1004,7 @@ export class Pipeline {
       // fresh session continues it instead of starting blind. Empty for genuinely
       // fresh work (clean worktree off base).
       const priorWork = priorWorkSummary(repo, branch, base);
-      const result = await implement(this.deps.runner, this.deps.config, issue, worktree, budget, scope, priorWork);
+      const result = await implement(this.deps.runner, this.deps.config, issue, worktree, budget, scope, priorWork, base);
       await this.charge(issue.number, task.repoKey, result.costUsd, `implement (${task.repoKey})`);
       if (result.blocked) return this.parkRepo(issue, task, "IMPLEMENT", result);
       // A fix that didn't finish can't ship — hard-fail (the partial work stays
@@ -1024,6 +1052,7 @@ export class Pipeline {
           fixBudget,
           scope,
           priorWorkSummary(repo, branch, base),
+          base,
         );
         await this.charge(issue.number, task.repoKey, fix.costUsd, `implement-fix (${task.repoKey})`);
         if (fix.blocked) return this.parkRepo(issue, task, "IMPLEMENT", fix);
@@ -1280,7 +1309,7 @@ export class Pipeline {
         label: `resume #${issue.number} (${task.repoKey})`,
         cwd: worktree,
         resume: task.sessionId,
-        prompt: resumeWithAnswerPrompt(reply.body),
+        prompt: resumeWithAnswerPrompt(reply.body, base),
         enableAskHuman: true,
         maxTurns: this.deps.config.maxImplementTurns,
         maxBudgetUsd: budget,

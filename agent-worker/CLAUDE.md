@@ -105,6 +105,18 @@ PR  (git push + gh pr create against the default branch)
 DONE  (close resolved, Löst; comment PR link; remove worktree)
 ```
 
+**Always on top of main:** whenever the bot picks up an *existing* branch to
+carry on — a crashed/committed attempt recovered at TEST/REVIEW, a case resumed
+at a persisted phase after a pause/restart, an `ask_human` resume, or a PR-
+feedback round — it first merges the latest default branch in, so tests, review
+and the eventual PR reflect current main rather than a stale base. Fresh work
+needs no merge (its worktree is created straight off `origin/<base>`). The merge
+happens two ways: `repos.mergeBaseIntoWorktree` (a code merge at the `driveRepoTask`
+pickup point — skips a dirty worktree, hands off to `needs-human` on an
+unresolvable conflict), and the shared `mergeBaseSteps` instruction inside the
+resume/PR-feedback prompts (so the agent session itself merges + resolves
+conflicts on the dirty-resume paths the code merge can't touch).
+
 **Human-in-the-loop:** the implement/review sessions have an `ask_human` MCP
 tool. Calling it aborts the session; the orchestrator posts the question as an
 issue comment and parks the case (BLOCKED). Each poll tick checks BLOCKED cases

@@ -1,6 +1,11 @@
 import { expect } from "chai";
 import { slugify, branchName, slugFromBranch, mentionsBot, feedbackForBot } from "../pipeline.js";
-import { triageSystemPrompt, prFeedbackSystemPrompt } from "../prompts.js";
+import {
+  triageSystemPrompt,
+  prFeedbackSystemPrompt,
+  implementSystemPrompt,
+  resumeWithAnswerPrompt,
+} from "../prompts.js";
 import type { PrComment, IssueDetail } from "../github.js";
 
 describe("slugify", () => {
@@ -144,6 +149,57 @@ describe("prFeedbackSystemPrompt", () => {
 
   it("uses whatever base branch it is given", () => {
     const prompt = prFeedbackSystemPrompt(issue, undefined, feedback, "develop");
+    expect(prompt).to.include("git merge origin/develop");
+    expect(prompt).to.not.include("git merge origin/main");
+  });
+});
+
+describe("implementSystemPrompt", () => {
+  const issue: IssueDetail = {
+    number: 7,
+    title: "Bad reading",
+    labels: [],
+    state: "open",
+    body: "Values look off.",
+    comments: [],
+  };
+
+  it("does NOT tell fresh work to merge the base (nothing to continue from)", () => {
+    const prompt = implementSystemPrompt(issue, undefined, undefined, "main");
+    expect(prompt).to.not.include("git merge origin/main");
+  });
+
+  it("tells a resumed session (prior work present) to merge the latest base first", () => {
+    const prompt = implementSystemPrompt(
+      issue,
+      undefined,
+      "Commits already on this branch:\nabc123 wip",
+      "main",
+    );
+    expect(prompt).to.include("git fetch origin main");
+    expect(prompt).to.include("git merge origin/main");
+    expect(prompt).to.match(/never .*merge --abort/i);
+    // Uncommitted work must be committed before the merge can proceed.
+    expect(prompt).to.match(/[Cc]ommit any uncommitted changes/);
+  });
+
+  it("names the given base branch in the merge instruction", () => {
+    const prompt = implementSystemPrompt(issue, undefined, "abc123 wip", "develop");
+    expect(prompt).to.include("git merge origin/develop");
+    expect(prompt).to.not.include("git merge origin/main");
+  });
+});
+
+describe("resumeWithAnswerPrompt", () => {
+  it("merges the latest base before continuing, and carries the human's answer", () => {
+    const prompt = resumeWithAnswerPrompt("Use the kWh field, not Wh.", "main");
+    expect(prompt).to.include("Use the kWh field, not Wh.");
+    expect(prompt).to.include("git merge origin/main");
+    expect(prompt).to.match(/never .*merge --abort/i);
+  });
+
+  it("names the given base branch", () => {
+    const prompt = resumeWithAnswerPrompt("ok", "develop");
     expect(prompt).to.include("git merge origin/develop");
     expect(prompt).to.not.include("git merge origin/main");
   });

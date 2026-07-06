@@ -173,6 +173,7 @@ export function implementSystemPrompt(
   issue: IssueDetail,
   scope?: RepoScope,
   priorWork?: string,
+  base = "main",
 ): string {
   const scopeText = scope ? scopeBlock(scope) : "";
   return [
@@ -182,7 +183,7 @@ export function implementSystemPrompt(
     AUTONOMY_RULE,
     "",
     ...(scopeText ? [scopeText, ""] : []),
-    ...(priorWork ? [priorWorkBlock(priorWork), ""] : []),
+    ...(priorWork ? [priorWorkBlock(priorWork, base), ""] : []),
     "Your task:",
     "1. Reproduce/understand the reported problem from the issue.",
     "2. Implement a correct, minimal fix that matches the surrounding code"
@@ -237,12 +238,34 @@ function scopeBlock(s: RepoScope): string {
   return lines.join("\n");
 }
 
-function priorWorkBlock(summary: string): string {
+/**
+ * The steps that bring the current branch up to date with `origin/<base>` before
+ * work continues, resolving conflicts rather than abandoning the merge. Shared by
+ * every prompt that RESUMES work on an existing branch (implement-resume,
+ * ask_human-resume, PR-feedback) so the instruction is worded identically.
+ */
+export function mergeBaseSteps(base: string): string[] {
+  return [
+    `Run \`git fetch origin ${base}\` then \`git merge origin/${base}\` to bring this branch up to date with the latest ${base}.`,
+    `If the merge reports conflicts, resolve EVERY one: open each conflicted file and reconcile the two sides so ` +
+      `BOTH the latest ${base} and the existing work are preserved, then \`git add\` the resolved files and complete ` +
+      "the merge with `git commit`. Never leave conflict markers (`<<<<<<<`, `=======`, `>>>>>>>`) in any file, and " +
+      "never `git merge --abort`.",
+    "If a conflict is genuinely impossible to resolve safely, stop and say so clearly in your final summary rather " +
+      "than guessing — the orchestrator will hand it to a maintainer.",
+  ];
+}
+
+function priorWorkBlock(summary: string, base: string): string {
   return [
     "A previous attempt already started this fix on the current branch (a separate session — you do not have its memory). " +
       "Review what is already here and CONTINUE from it: build on the existing commits and changes, and do not start over or revert them unless they are wrong.",
     "",
     summary,
+    "",
+    `Before continuing, bring this branch up to date with the latest \`${base}\` so your fix and its tests build on ` +
+      `current ${base}, not a stale base. Commit any uncommitted changes first so the merge can proceed, then:`,
+    ...mergeBaseSteps(base).map((s) => `- ${s}`),
   ].join("\n");
 }
 
@@ -250,13 +273,17 @@ export function implementPrompt(): string {
   return "Implement the fix for this support case now, end to end. Commit when the tests pass.";
 }
 
-export function resumeWithAnswerPrompt(answer: string): string {
+export function resumeWithAnswerPrompt(answer: string, base = "main"): string {
   return [
     "A human has replied to your question:",
     "",
     answer,
     "",
-    "Continue the task with this information.",
+    `Before continuing, bring this branch up to date with the latest \`${base}\`. Commit any uncommitted changes ` +
+      "first so the merge can proceed, then:",
+    ...mergeBaseSteps(base).map((s) => `- ${s}`),
+    "",
+    "Then continue the task with this information.",
   ].join("\n");
 }
 
@@ -305,13 +332,7 @@ export function prFeedbackSystemPrompt(
     ...(scopeText ? [scopeText, ""] : []),
     "Your task:",
     `1. FIRST bring the branch up to date with the default branch so the PR is not behind it:`,
-    `   • Run \`git fetch origin ${base}\` then \`git merge origin/${base}\`.`,
-    `   • If the merge reports conflicts, resolve EVERY one: open each conflicted file and reconcile the`,
-    `     two sides so BOTH the latest ${base} and this PR's fix are preserved, then \`git add\` the`,
-    `     resolved files and complete the merge with \`git commit\`. Never leave conflict markers`,
-    `     (\`<<<<<<<\`, \`=======\`, \`>>>>>>>\`) in any file, and never \`git merge --abort\`.`,
-    `   • If a conflict is genuinely impossible to resolve safely, stop and say so clearly in your`,
-    `     final summary rather than guessing — the orchestrator will hand it to a maintainer.`,
+    ...mergeBaseSteps(base).map((s) => `   • ${s}`),
     "2. Make the requested change(s) to the code.",
     "3. Update or add unit tests if the change affects behaviour; keep existing tests green.",
     `4. Run the repo's test suite and make it pass (this also confirms the ${base} merge didn't break anything).`,

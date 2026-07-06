@@ -175,6 +175,57 @@ export function commitsAhead(repo: Repo, branch: string, base: string): number {
   }
 }
 
+/** What `mergeBaseIntoWorktree` did (or couldn't do). */
+export type MergeOutcome = "current" | "merged" | "conflict" | "skipped";
+
+/**
+ * Bring the branch's worktree up to date with the latest default branch by
+ * merging `origin/<base>` into it, so work always CONTINUES on top of current
+ * main rather than a stale base. Fetches `origin/<base>` first. Idempotent.
+ *
+ *  - "current"  — the branch already contains `origin/<base>` (nothing merged).
+ *  - "merged"   — a merge/fast-forward brought it up to date.
+ *  - "conflict" — the merge hit conflicts; it is ABORTED so the worktree is left
+ *                 clean at its pre-merge state, and the caller decides what to do
+ *                 (the pipeline hands the sub-task to a human).
+ *  - "skipped"  — no worktree, offline/no remote, or a DIRTY worktree. A dirty
+ *                 worktree means an interrupted session's uncommitted work is
+ *                 still present; merging into it is unsafe, so we leave it be and
+ *                 let the resuming agent session bring the branch up to date
+ *                 itself (see the merge steps in prompts.ts).
+ */
+export function mergeBaseIntoWorktree(repo: Repo, branch: string, base: string): MergeOutcome {
+  const path = worktreePath(repo, branch);
+  if (!existsSync(path)) return "skipped";
+  try {
+    git(repo.path, ["fetch", "origin", base]);
+  } catch {
+    return "skipped"; // offline / no remote — nothing to merge against
+  }
+  // Never merge into uncommitted work — leave a dirty worktree untouched.
+  if (isWorktreeDirty(repo, branch)) return "skipped";
+  try {
+    const behind = git(path, ["rev-list", "--count", `HEAD..origin/${base}`]);
+    if ((Number(behind) || 0) === 0) return "current";
+  } catch {
+    // Couldn't compute how far behind (e.g. no origin/<base> ref) — fall through
+    // and let the merge itself decide.
+  }
+  try {
+    git(path, ["merge", "--no-edit", `origin/${base}`]);
+    return "merged";
+  } catch {
+    // Conflicts (or another merge failure) — abort so the worktree is left clean
+    // at its pre-merge state for the caller to hand off.
+    try {
+      git(path, ["merge", "--abort"]);
+    } catch {
+      // best effort
+    }
+    return "conflict";
+  }
+}
+
 /** The repo's default branch (e.g. "main"), via origin/HEAD. */
 export function defaultBranch(repo: Repo): string {
   // origin/HEAD -> refs/remotes/origin/main

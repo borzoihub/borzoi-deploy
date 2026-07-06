@@ -50,11 +50,12 @@ export async function implement(
   budgetUsd: number,
   scope?: RepoScope,
   priorWork?: string,
+  base = "main",
 ): Promise<RunResult> {
   return runner.run({
     label: `implement #${issue.number}${scope ? ` (${scope.repoKey})` : ""}`,
     cwd: worktreePath,
-    systemPrompt: implementSystemPrompt(issue, scope, priorWork),
+    systemPrompt: implementSystemPrompt(issue, scope, priorWork, base),
     prompt: implementPrompt(),
     maxTurns: config.maxImplementTurns,
     maxBudgetUsd: budgetUsd,
