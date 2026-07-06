@@ -221,10 +221,13 @@ export class Pipeline {
   }
 
   /**
-   * Commit whatever each of the case's repo worktrees currently holds, so a
-   * force-aborted session's work is preserved on its branch (a resume then
-   * continues from it via `priorWorkSummary`). Best-effort per repo; a clean
-   * worktree (the graceful path — the session already committed) is a no-op.
+   * Commit whatever each of the case's repo worktrees currently holds and push
+   * the branch, so a force-aborted session's work is preserved on its branch AND
+   * visible on the remote for a human to review (reviewing in-flight work is a
+   * common reason to pause). A resume then continues from it via
+   * `priorWorkSummary`. Best-effort per repo; a clean worktree (the graceful
+   * path — the session already committed) still gets pushed if the branch has
+   * unpushed commits.
    */
   private async commitPausedWork(issueNumber: number): Promise<void> {
     let tasks: RepoTaskRow[];
@@ -240,6 +243,17 @@ export class Pipeline {
       if (!repo) continue;
       if (commitWorktree(repo, task.branch, `WIP: paused by operator (#${issueNumber})`)) {
         this.narrate(issueNumber, `Committed in-flight work in "${task.repoKey}" before pausing.`);
+      }
+      // Push the branch so a human can review the paused work on the remote.
+      // Only if the worktree exists (nothing to push otherwise) and best-effort
+      // — an offline box or push failure must not mask the PauseError.
+      if (!hasWorktree(repo, task.branch)) continue;
+      try {
+        const path = ensureWorktree(repo, task.branch, task.branch);
+        pushBranch(this.deps.config, path, task.branch);
+        this.narrate(issueNumber, `Pushed "${task.repoKey}" branch \`${task.branch}\` for review.`);
+      } catch (e) {
+        console.error(`[pause] #${issueNumber}: could not push ${task.repoKey} branch ${task.branch}:`, String(e));
       }
     }
   }

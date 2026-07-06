@@ -95,6 +95,10 @@ async function describeTicket(state: StateStore, issueNumber: number): Promise<s
   const c = await state.get(issueNumber);
   if (!c) return "New — queued for triage";
 
+  // Paused cases are excluded from every work set this tick, so don't describe
+  // an intent ("triaging now") the bot won't act on — say it's paused instead.
+  if (c.paused) return "Paused by operator — no action until resumed";
+
   switch (c.phase) {
     case "NEW":
       return "Not yet triaged — triaging now";
@@ -259,10 +263,10 @@ async function tick(deps: {
     } catch (e) {
       if (e instanceof ShutdownError) throw e;
       if (e instanceof PauseError) {
-        // Operator paused it: in-flight work is committed on the branch and the
-        // case is left at its persisted phase. Don't flag needs-human — just
-        // stop touching it until the operator resumes.
-        console.log(`[${ts()}]   ⏸ #${row.issueNumber}: paused — committed work is on its branch; stopping until resumed.`);
+        // Operator paused it: in-flight work is committed and pushed to its
+        // branch (so a human can review it) and the case is left at its persisted
+        // phase. Don't flag needs-human — just stop touching it until resumed.
+        console.log(`[${ts()}]   ⏸ #${row.issueNumber}: paused — committed work pushed to its branch; stopping until resumed.`);
         continue;
       }
       console.error(`[${ts()}]   processing failed for #${row.issueNumber} (will retry next tick):`, e);
