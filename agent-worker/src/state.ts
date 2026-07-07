@@ -87,6 +87,13 @@ export interface CaseRow {
    * `false` for every other case.
    */
   planOnly: boolean;
+  /**
+   * True when ANOTHER worker currently holds a live active-work lease on this
+   * case. Central-derived (from `lease_expires_at`, not the raw token). The
+   * startup reconcile uses it to avoid re-asserting the phase of a case a
+   * sibling is actively driving. `false` for every idle/parked case.
+   */
+  leased: boolean;
   updatedAt: string;
 }
 
@@ -140,6 +147,7 @@ interface CaseDto {
   paused: boolean;
   budgetUsd: number | null;
   planOnly: boolean;
+  leased?: boolean;
   updatedAt: string | null;
   repoTasks: RepoTaskDto[];
 }
@@ -183,6 +191,7 @@ function toCaseRow(dto: CaseDto): CaseRow {
     paused: !!dto.paused,
     budgetUsd: dto.budgetUsd ?? null,
     planOnly: !!dto.planOnly,
+    leased: !!dto.leased,
     updatedAt: dto.updatedAt ?? "",
   };
 }
@@ -237,6 +246,11 @@ export class StateStore {
       // Distinguished from other failures: a missing row is a valid "not found"
       // for get-style calls, which the callers handle as `undefined`.
       throw new NotFoundError(`${method} ${path} → 404`);
+    }
+    if (res.status === 409) {
+      // Lease conflict: a claim lost the race (another worker holds it) or a
+      // heartbeat's lease went stale. Callers map this to their own semantics.
+      throw new ConflictError(`${method} ${path} → 409`);
     }
     if (!res.ok) {
       const text = await res.text().catch(() => "");
@@ -313,6 +327,79 @@ export class StateStore {
     return result.costUsd ?? 0;
   }
 
+  // --- Per-case lease (multi-worker mutual exclusion) -----------------------
+
+  /**
+   * Atomically claim the active-work lease on a case for this worker. Returns:
+   *  - `{ acquired: true, leaseToken }`  — we own it; heartbeat/release with the
+   *    token while processing.
+   *  - `{ acquired: true, leaseToken: null }` — leasing is UNSUPPORTED by central
+   *    (an older backend 404s the route). Proceed unclaimed (single-worker
+   *    behaviour) — there's no token to heartbeat/release.
+   *  - `{ acquired: false, leaseToken: null }` — a live lease is held by another
+   *    worker (409). Skip this case this tick.
+   * A missing route can't be told apart from a missing case at the HTTP layer,
+   * but by claim time main.ts has already `ensure`d every case, so a 404 here
+   * means the endpoint doesn't exist → treat as unsupported, never as "case
+   * gone" (which would wrongly starve the queue).
+   */
+  async claimCase(
+    issueNumber: number,
+    workerId: string,
+  ): Promise<{ acquired: boolean; leaseToken: string | null }> {
+    try {
+      const res = await this.request<{ leaseToken: string; leaseSeconds: number }>(
+        "POST",
+        `/api/support/agent/cases/${issueNumber}/claim`,
+        { workerId },
+      );
+      return { acquired: true, leaseToken: res.leaseToken };
+    } catch (e) {
+      if (e instanceof ConflictError) return { acquired: false, leaseToken: null };
+      if (e instanceof NotFoundError) return { acquired: true, leaseToken: null }; // unsupported → proceed
+      throw e;
+    }
+  }
+
+  /**
+   * Renew a held lease and read the case's live `paused` flag in one round trip.
+   * Throws {@link LostLeaseError} on a stale lease (409) so the pause-watch aborts
+   * the session (a sibling took over). A transient error / missing case is
+   * swallowed as `{ paused: false }` — we don't kill a running session over a
+   * blip; only an explicit 409 revokes the lease.
+   */
+  async heartbeatCase(
+    issueNumber: number,
+    leaseToken: string,
+  ): Promise<{ paused: boolean }> {
+    try {
+      return await this.request<{ paused: boolean }>(
+        "POST",
+        `/api/support/agent/cases/${issueNumber}/heartbeat`,
+        { leaseToken },
+      );
+    } catch (e) {
+      if (e instanceof ConflictError) throw new LostLeaseError(`lease lost for #${issueNumber}`);
+      if (e instanceof NotFoundError) return { paused: false }; // route/case gone → treat as blip
+      throw e;
+    }
+  }
+
+  /**
+   * Release a held lease so a parked/finished case is immediately re-claimable.
+   * Best-effort: never throws (a failed release just lets the lease lapse on its
+   * TTL).
+   */
+  async releaseCase(issueNumber: number, leaseToken: string): Promise<void> {
+    try {
+      await this.request("POST", `/api/support/agent/cases/${issueNumber}/release`, {
+        leaseToken,
+      });
+    } catch {
+      // Swallow — the lease will expire on its own if this didn't land.
+    }
+  }
+
   /**
    * Append a granular worker-activity event (triage/implement/test/review) to the
    * case's central timeline journal. Informational/maintainer-only — it never
@@ -383,3 +470,21 @@ export class StateStore {
 
 /** Thrown for a 404 so get-style callers can map it to `undefined`. */
 class NotFoundError extends Error {}
+
+/** Thrown for a 409 (lease conflict); mapped per-method to a claim miss or a
+ *  {@link LostLeaseError}. Internal to this module. */
+class ConflictError extends Error {}
+
+/**
+ * Thrown when a heartbeat finds the lease has gone stale — another worker
+ * reclaimed the case after our lease expired. The pipeline treats it like an
+ * operator pause abort (stop the session) EXCEPT it must not commit/push (we no
+ * longer own the branch) — it just unwinds and lets the case be re-driven by
+ * whoever holds the lease now.
+ */
+export class LostLeaseError extends Error {
+  constructor(message = "case lease lost to another worker") {
+    super(message);
+    this.name = "LostLeaseError";
+  }
+}

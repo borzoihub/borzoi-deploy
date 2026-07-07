@@ -11,6 +11,21 @@
 #   4. mkdir -p agent-data/repos && git clone <each repo> into agent-data/repos/
 #   5. docker compose -f docker-compose.agent.yml up -d --build
 #
+# Per-case leasing: the worker atomically claims each case in central before
+# working it, so an overlapping restart (or a second worker) can never drive the
+# same case twice. A single worker needs no extra config — the claim always
+# succeeds on an idle case. Set a STABLE WORKER_ID (in agent-worker/.env) so a
+# restart reclaims its own in-flight case fast.
+#
+# Running SEVERAL workers in parallel (future — optional): each worker MUST have
+#   (a) its OWN REPOS_DIR clone set — two processes sharing one clone corrupt each
+#       other's git (.git/index.lock); mount a distinct ./agent-data-<n>:/data per
+#       service, pre-cloned with the workable repos, and
+#   (b) a distinct, stable WORKER_ID.
+# They share the same CENTRAL_API_BASE_URL + AGENT_WORKER_TOKEN (central is the
+# coordinator). Duplicate the `agent-worker` service block per worker with those
+# two differences; everything else is identical.
+#
 services:
   agent-worker:
     build:

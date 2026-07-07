@@ -1,7 +1,7 @@
 import type { Config } from "./config.js";
 import type { GitHub, IssueDetail } from "./github.js";
 import { LABEL_IN_PROGRESS, LABEL_NEEDS_HUMAN, LABEL_WONTFIX, RETRY_COMMAND } from "./github.js";
-import type { StateStore, CaseRow, RepoTaskRow, RepoPhase } from "./state.js";
+import { LostLeaseError, type StateStore, type CaseRow, type RepoTaskRow, type RepoPhase } from "./state.js";
 import { ShutdownError, PauseError, type ClaudeRunner, type RunResult } from "./claude.js";
 import {
   discoverRepos,
@@ -150,6 +150,48 @@ export class Pipeline {
    *  round-trip on every check. */
   private readonly pausedIssues = new Set<number>();
 
+  /** Active-work lease token per case currently being processed by this worker.
+   *  Populated by `claim`, consumed by the pause-watch heartbeat + `release`.
+   *  Empty when leasing is disabled/unsupported (then the worker runs unclaimed,
+   *  exactly as before). */
+  private readonly leaseTokens = new Map<number, string>();
+
+  /** Issue numbers whose lease was lost mid-run (a sibling reclaimed it after our
+   *  lease expired). Read by `throwIfPaused` so the case unwinds at the next
+   *  boundary WITHOUT committing — we no longer own the branch. */
+  private readonly lostLeaseIssues = new Set<number>();
+
+  /**
+   * Atomically claim the active-work lease on a case before processing it this
+   * tick, so no two live workers drive the same case. Returns false when another
+   * worker holds a live lease (the caller skips the case this tick). A no-op
+   * success (returns true, stores no token) when leasing is disabled or the
+   * central is too old to support it — the worker then runs exactly as before.
+   */
+  async claim(issueNumber: number): Promise<boolean> {
+    if (!this.deps.config.leasingEnabled) return true;
+    const { acquired, leaseToken } = await this.deps.state.claimCase(
+      issueNumber,
+      this.deps.config.workerId,
+    );
+    if (!acquired) {
+      this.narrate(issueNumber, "Held by another worker — skipping this tick.");
+      return false;
+    }
+    if (leaseToken) this.leaseTokens.set(issueNumber, leaseToken);
+    return true;
+  }
+
+  /** Release the lease held for a case (best-effort, idempotent). Called from a
+   *  `finally` around every claimed work-set action so a parked/finished case is
+   *  immediately re-claimable. */
+  async release(issueNumber: number): Promise<void> {
+    const token = this.leaseTokens.get(issueNumber);
+    if (!token) return;
+    this.leaseTokens.delete(issueNumber);
+    await this.deps.state.releaseCase(issueNumber, token);
+  }
+
   private repoOrThrow(repoKey: string): Repo {
     const repo = findRepo(this.deps.config.reposDir, repoKey);
     if (!repo) {
@@ -161,6 +203,26 @@ export class Pipeline {
   /** Human-readable, one-line progress narration for an operator watching logs. */
   private narrate(issueNumber: number, message: string): void {
     console.log(`▶ #${issueNumber}: ${message}`);
+  }
+
+  /**
+   * Best-effort push of a case's WIP branch to the remote after a phase commit.
+   * The branch (and any committed-but-unpushed work) otherwise lives ONLY in this
+   * worker's local clone; pushing early means a crash — or a takeover by another
+   * worker, which can't see this clone — recovers the work from the remote
+   * (`recoverExistingWork`'s GitHub fallback) instead of re-implementing from
+   * scratch. Never fails the case: a push error is logged and swallowed (the work
+   * still lives locally and ships at PR time).
+   */
+  private pushWip(worktree: string, branch: string, label: string): void {
+    try {
+      pushBranch(this.deps.config, worktree, branch);
+    } catch (e) {
+      console.warn(
+        `[wip-push] ${label}: could not push ${branch} (${String(e).slice(0, 200)}) — ` +
+          `continuing; the work stays on the local branch.`,
+      );
+    }
   }
 
   // ── Operator pause ────────────────────────────────────────────────────────
@@ -180,8 +242,27 @@ export class Pipeline {
       void (async () => {
         let paused = false;
         try {
-          paused = (await this.deps.state.get(issueNumber))?.paused ?? false;
-        } catch {
+          // When we hold a lease, the heartbeat both renews it AND returns the
+          // live pause flag in one round trip (so this stays a single call). A
+          // stale-lease 409 surfaces as LostLeaseError → abort without commit.
+          // Unclaimed (leasing off/unsupported) → the plain pause read as before.
+          const token = this.leaseTokens.get(issueNumber);
+          paused = token
+            ? (await this.deps.state.heartbeatCase(issueNumber, token)).paused
+            : (await this.deps.state.get(issueNumber))?.paused ?? false;
+        } catch (e) {
+          if (e instanceof LostLeaseError) {
+            // A sibling reclaimed the case after our lease expired. Abort NOW —
+            // no grace, and (unlike a pause) no commit/push: another worker may
+            // already be writing this branch. `throwIfPaused` / the catch below
+            // translate the abort into a LostLeaseError.
+            this.lostLeaseIssues.add(issueNumber);
+            console.warn(
+              `[lease] #${issueNumber}: lease lost — aborting; another worker now owns the case.`,
+            );
+            this.deps.runner.requestPause();
+            return;
+          }
           return; // transient central error — re-check next poll
         }
         if (!paused) return;
@@ -203,6 +284,13 @@ export class Pipeline {
     try {
       return await fn();
     } catch (e) {
+      // A lost lease reuses the pause abort machinery (requestPause aborts the
+      // session → PauseError), but must NOT commit: we no longer own the branch.
+      // Translate it into a clean LostLeaseError for the tick to log-and-move-on.
+      if (e instanceof PauseError && this.lostLeaseIssues.has(issueNumber)) {
+        this.narrate(issueNumber, "Lease lost to another worker — stopping without committing.");
+        throw new LostLeaseError(`lease lost for #${issueNumber}`);
+      }
       if (e instanceof PauseError) {
         this.narrate(issueNumber, "Paused by operator — committing in-flight work and stopping.");
         await this.commitPausedWork(issueNumber);
@@ -211,13 +299,17 @@ export class Pipeline {
     } finally {
       clearInterval(timer);
       this.pausedIssues.delete(issueNumber);
+      this.lostLeaseIssues.delete(issueNumber);
       this.deps.runner.clearPause();
     }
   }
 
-  /** Throw if this case has been paused, to unwind at a safe phase boundary. Cheap
-   *  (reads the watcher's set) so it can guard every session without an HTTP call. */
+  /** Throw if this case has been paused OR its lease was lost, to unwind at a safe
+   *  phase boundary. Cheap (reads the watcher's sets) so it can guard every
+   *  session without an HTTP call. Lost-lease is checked first: it must stop the
+   *  case WITHOUT committing, whereas a pause commits its in-flight work. */
   private throwIfPaused(issueNumber: number): void {
+    if (this.lostLeaseIssues.has(issueNumber)) throw new LostLeaseError();
     if (this.pausedIssues.has(issueNumber)) throw new PauseError();
   }
 
@@ -358,6 +450,19 @@ export class Pipeline {
 
   private async needsHumanCase(issue: IssueDetail, message: string): Promise<void> {
     this.narrate(issue.number, `Handing off to a human: ${message}`);
+    // A needs-human hand-off must live on an OPEN issue. If another run has
+    // already closed this issue (e.g. resolved it), reopen it BEFORE labelling —
+    // otherwise we'd leave the impossible `closed + needs-human` state that made
+    // reconcile silently resolve #36. A won't-fix close is deliberate, so leave
+    // it be. Reaching here on a closed issue is an anomaly worth logging.
+    const gh = this.deps.github.issueState(issue.number);
+    if (gh?.state === "closed" && !gh.labels.map((l) => l.toLowerCase()).includes(LABEL_WONTFIX)) {
+      console.warn(
+        `[needs-human] #${issue.number}: issue was already closed — reopening before flagging ` +
+          `needs-human (another run likely resolved it; investigate the overlap).`,
+      );
+      this.deps.github.reopenIssue(issue.number);
+    }
     this.deps.github.addLabel(issue.number, LABEL_NEEDS_HUMAN);
     this.deps.github.comment(
       issue.number,
@@ -507,6 +612,13 @@ export class Pipeline {
       `🤖❓ **Question from the support-fix bot** (about \`${task.repoKey}\`): ${question}\n\n_Reply to this issue and I'll continue._`,
     );
     const blockedCommentId = this.deps.github.lastCommentId(issue.number) ?? null;
+    // Push whatever the parked session committed so a later resume by a DIFFERENT
+    // worker (this case now sits unowned for days) recovers it from the remote,
+    // not just this clone. Best-effort; the worktree already exists here.
+    const repo = findRepo(this.deps.config.reposDir, task.repoKey);
+    if (repo && task.branch) {
+      this.pushWip(ensureWorktree(repo, task.branch, defaultBranch(repo)), task.branch, `park ${task.repoKey}`);
+    }
     await this.setRepoPhase(issue.number, task.repoKey, "BLOCKED", {
       resumePhase,
       sessionId: result.sessionId ?? null,
@@ -614,8 +726,10 @@ export class Pipeline {
       try {
         await this.driveRepoTask(issue, (await this.deps.state.getRepoTask(issue.number, task.repoKey))!);
       } catch (e) {
-        // Operator shutdown / pause: unwind without flagging needs-human or posting.
-        if (e instanceof ShutdownError || e instanceof PauseError) throw e;
+        // Operator shutdown / pause / lost lease: unwind without flagging
+        // needs-human or posting — the case is left at its persisted phase for a
+        // restart (shutdown), a resume (pause), or the new owner (lost lease).
+        if (e instanceof ShutdownError || e instanceof PauseError || e instanceof LostLeaseError) throw e;
         // A hard error on one repo shouldn't sink the others; flag it and move on.
         await this.needsHumanRepo(issue, task, `Error while working this repo: ${String(e)}`);
       }
@@ -1013,6 +1127,8 @@ export class Pipeline {
       if (result.isError) return this.needsHumanRepo(issue, task, "The implementation session errored out.");
       // Capture the agent's own account of the fix for the dashboard.
       await this.recordFixSummary(issue.number, task.repoKey, result);
+      // Push the fresh implementation so a crash/takeover can recover it remotely.
+      this.pushWip(worktree, branch, `implement ${task.repoKey}`);
       await this.setRepoPhase(issue.number, task.repoKey, "TEST");
       phase = "TEST";
     }
@@ -1059,6 +1175,7 @@ export class Pipeline {
         if (fix.limitHit) return this.outOfBudgetRepo(issue, task, "implementation");
         if (fix.isError) return this.needsHumanRepo(issue, task, "The fix session errored out.");
         await this.recordFixSummary(issue.number, task.repoKey, fix);
+        this.pushWip(worktree, branch, `test-fix ${task.repoKey}`);
         return this.driveRepoTask(issue, (await this.deps.state.getRepoTask(issue.number, task.repoKey))!);
       }
       await this.setRepoPhase(issue.number, task.repoKey, "REVIEW");
@@ -1106,6 +1223,7 @@ export class Pipeline {
           // advisory read-pass above, fixing real findings is load-bearing).
           if (fix.limitHit) return this.outOfBudgetRepo(issue, task, "review fixes");
           if (fix.isError) return this.needsHumanRepo(issue, task, "The review-fix session errored out.");
+          this.pushWip(worktree, branch, `review-fix ${task.repoKey}`);
           return this.driveRepoTask(issue, (await this.deps.state.getRepoTask(issue.number, task.repoKey))!);
         }
         await this.setRepoPhase(issue.number, task.repoKey, "PR");

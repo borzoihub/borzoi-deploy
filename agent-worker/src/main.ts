@@ -2,9 +2,9 @@ import { execFileSync } from "node:child_process";
 import { existsSync, statSync } from "node:fs";
 import { DateHelper } from "@digistrada/theworks-common";
 import { loadConfig, type Config } from "./config.js";
-import { GitHub } from "./github.js";
+import { GitHub, LABEL_NEEDS_HUMAN, LABEL_WONTFIX } from "./github.js";
 import { phaseFromGitHub } from "./githubPhase.js";
-import { StateStore, type Phase, type RepoTaskRow } from "./state.js";
+import { StateStore, LostLeaseError, type Phase, type RepoTaskRow } from "./state.js";
 import { ClaudeRunner, ShutdownError, PauseError } from "./claude.js";
 import { Pipeline } from "./pipeline.js";
 
@@ -138,12 +138,32 @@ async function reconcileJournal(github: GitHub, state: StateStore): Promise<void
   }
   let corrected = 0;
   for (const c of cases) {
+    // Don't touch a case another worker is actively driving (live lease) — its
+    // phase is mid-transition and central is authoritative for it, not GitHub's
+    // eventually-consistent labels. (No-op for a single worker: nothing is leased
+    // at startup.)
+    if (c.leased) {
+      console.log(`[${ts()}] reconcile: #${c.issueNumber} is leased by another worker — skipping.`);
+      continue;
+    }
     const gh = github.issueState(c.issueNumber);
     if (!gh) {
       console.log(
         `[${ts()}] reconcile: #${c.issueNumber} not found on GitHub — leaving journal phase ${c.phase} untouched.`,
       );
       continue;
+    }
+    // Self-heal the `closed + needs-human` contradiction (the #36 state): a
+    // needs-human hand-off must live on an OPEN issue. Reopen it so it's a valid
+    // parked case again, rather than leaving a closed issue that reads as
+    // resolved to the customer. `phaseFromGitHub` maps this to NEEDS_HUMAN.
+    const labelSet = new Set(gh.labels.map((l) => l.toLowerCase()));
+    if (gh.state === "closed" && labelSet.has(LABEL_NEEDS_HUMAN) && !labelSet.has(LABEL_WONTFIX)) {
+      console.warn(
+        `[${ts()}] reconcile: #${c.issueNumber} is CLOSED but wears needs-human (contradiction — ` +
+          `likely an overlapping-run artifact). Reopening to restore a valid parked state.`,
+      );
+      github.reopenIssue(c.issueNumber);
     }
     const truth = phaseFromGitHub(gh, c.phase);
     if (truth !== c.phase) {
@@ -160,6 +180,28 @@ async function reconcileJournal(github: GitHub, state: StateStore): Promise<void
 }
 
 let tickCount = 0;
+
+/**
+ * Run one claimed work-set action: atomically claim the case's active-work lease,
+ * run `fn`, then always release it. The claim is the single mutual-exclusion
+ * primitive across the whole tick — no two live workers act on the same case.
+ * Returns without running `fn` when another worker holds the lease. Claim is done
+ * BEFORE `fn` so a command action (/retry, @-mention) reacts+drives exactly once:
+ * the loser of the claim never reaches its 👀-reaction. A lost-lease abort inside
+ * `fn` propagates to the caller (handled like a pause: stop, don't flag).
+ */
+async function underClaim(
+  pipeline: Pipeline,
+  issueNumber: number,
+  fn: () => Promise<void>,
+): Promise<void> {
+  if (!(await pipeline.claim(issueNumber))) return;
+  try {
+    await fn();
+  } finally {
+    await pipeline.release(issueNumber);
+  }
+}
 
 async function tick(deps: {
   config: Config;
@@ -217,9 +259,12 @@ async function tick(deps: {
   for (const row of parked) {
     console.log(`[${ts()}]   ↻ #${row.issueNumber}: checking for a human reply…`);
     try {
-      await pipeline.resumeIfReplied(github.view(row.issueNumber), row);
+      await underClaim(pipeline, row.issueNumber, () =>
+        pipeline.resumeIfReplied(github.view(row.issueNumber), row),
+      );
     } catch (e) {
       if (e instanceof ShutdownError) throw e;
+      if (e instanceof PauseError || e instanceof LostLeaseError) continue;
       console.error(`[${ts()}]   resume failed for #${row.issueNumber}:`, e);
     }
   }
@@ -232,9 +277,12 @@ async function tick(deps: {
   );
   for (const row of needsHuman) {
     try {
-      await pipeline.retryIfRequested(github.view(row.issueNumber), row);
+      await underClaim(pipeline, row.issueNumber, () =>
+        pipeline.retryIfRequested(github.view(row.issueNumber), row),
+      );
     } catch (e) {
       if (e instanceof ShutdownError) throw e;
+      if (e instanceof PauseError || e instanceof LostLeaseError) continue;
       console.error(`[${ts()}]   retry check failed for #${row.issueNumber}:`, e);
     }
   }
@@ -248,9 +296,12 @@ async function tick(deps: {
   const rearmable = [...wontfix, ...needsHuman];
   for (const row of rearmable) {
     try {
-      await pipeline.rearmOnIssueMention(github.view(row.issueNumber), row);
+      await underClaim(pipeline, row.issueNumber, () =>
+        pipeline.rearmOnIssueMention(github.view(row.issueNumber), row),
+      );
     } catch (e) {
       if (e instanceof ShutdownError) throw e;
+      if (e instanceof PauseError || e instanceof LostLeaseError) continue;
       console.error(`[${ts()}]   issue-mention check failed for #${row.issueNumber}:`, e);
     }
   }
@@ -259,7 +310,9 @@ async function tick(deps: {
   for (const row of actionable) {
     console.log(`[${ts()}]   ▶ #${row.issueNumber} (${row.phase}): processing…`);
     try {
-      await pipeline.processCase(github.view(row.issueNumber), (await state.get(row.issueNumber))!);
+      await underClaim(pipeline, row.issueNumber, async () =>
+        pipeline.processCase(github.view(row.issueNumber), (await state.get(row.issueNumber))!),
+      );
     } catch (e) {
       if (e instanceof ShutdownError) throw e;
       if (e instanceof PauseError) {
@@ -267,6 +320,13 @@ async function tick(deps: {
         // branch (so a human can review it) and the case is left at its persisted
         // phase. Don't flag needs-human — just stop touching it until resumed.
         console.log(`[${ts()}]   ⏸ #${row.issueNumber}: paused — committed work pushed to its branch; stopping until resumed.`);
+        continue;
+      }
+      if (e instanceof LostLeaseError) {
+        // Our lease expired and another worker reclaimed the case mid-run. The
+        // session was aborted WITHOUT committing (the new owner may be writing the
+        // branch). Leave it at its persisted phase for that owner; don't flag.
+        console.log(`[${ts()}]   ⇄ #${row.issueNumber}: lease lost to another worker — stopping; it now owns the case.`);
         continue;
       }
       console.error(`[${ts()}]   processing failed for #${row.issueNumber} (will retry next tick):`, e);
@@ -293,9 +353,12 @@ async function tick(deps: {
   for (const row of withPrFeedback) {
     console.log(`[${ts()}]   💬 #${row.issueNumber}: checking PR(s) for maintainer feedback…`);
     try {
-      await pipeline.addressPrFeedbackForCase(github.view(row.issueNumber));
+      await underClaim(pipeline, row.issueNumber, () =>
+        pipeline.addressPrFeedbackForCase(github.view(row.issueNumber)),
+      );
     } catch (e) {
       if (e instanceof ShutdownError) throw e;
+      if (e instanceof PauseError || e instanceof LostLeaseError) continue;
       console.error(`[${ts()}]   PR-feedback check failed for #${row.issueNumber}:`, e);
     }
   }

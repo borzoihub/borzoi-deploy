@@ -19,9 +19,16 @@ export function phaseFromGitHub(
 ): Phase {
   const set = new Set(gh.labels.map((l) => l.toLowerCase()));
   if (gh.state === "closed") {
-    // A won't-fix close always carries the wontfix label (closeWontFix);
-    // anything else closed is a resolved (or human "completed") close.
-    return set.has(LABEL_WONTFIX) || set.has("duplicate") ? "WONTFIX" : "DONE";
+    // A won't-fix close always carries the wontfix label (closeWontFix).
+    if (set.has(LABEL_WONTFIX) || set.has("duplicate")) return "WONTFIX";
+    // `closed + needs-human` is a CONTRADICTION — a needs-human hand-off must
+    // live on an OPEN issue (see needsHumanCase). It shouldn't occur now that the
+    // bot reopens before flagging, but a manual close or a legacy #36-style row
+    // can produce it. Preserve the hand-off (NEEDS_HUMAN) rather than silently
+    // reading the close as resolved/DONE — the caller (reconcile) reopens + warns.
+    if (set.has(LABEL_NEEDS_HUMAN)) return "NEEDS_HUMAN";
+    // Anything else closed is a resolved (or human "completed") close.
+    return "DONE";
   }
   if (set.has(LABEL_NEEDS_HUMAN)) return "NEEDS_HUMAN";
   if (set.has(LABEL_IN_PROGRESS)) {

@@ -10,6 +10,7 @@
  * into REPOS_DIR; any git repo found there is workable. If a case needs a repo
  * that isn't present, the bot asks a human to clone it (see repos.ts).
  */
+import { hostname } from "node:os";
 
 export interface Config {
   // Claude backend. The Agent SDK authenticates against a Claude subscription
@@ -50,6 +51,24 @@ export interface Config {
   // `npm run mint:agent-worker-token`.
   centralApiBaseUrl: string;
   agentWorkerToken: string;
+
+  // Per-case leasing (multi-worker mutual exclusion). The worker atomically
+  // claims each case in central before working it, so two runs (an overlapping
+  // restart, or a second worker instance) can't drive the same case at once.
+  /**
+   * This worker instance's identity, written as the lease owner. Defaults to
+   * `<hostname>-<pid>`. Set a STABLE value per box (e.g. `bugfixer-1`) so a
+   * restart reclaims its own in-flight case immediately instead of waiting out
+   * the lease TTL; distinct values are REQUIRED when running several workers.
+   */
+  workerId: string;
+  /**
+   * Kill-switch. When false the worker skips claim/heartbeat/release entirely
+   * and behaves exactly as before leasing existed (single-worker only). Also the
+   * safe fallback path when running against a central too old to expose the
+   * lease endpoints. Default true.
+   */
+  leasingEnabled: boolean;
 }
 
 function required(name: string): string {
@@ -78,6 +97,19 @@ function requiredFloat(name: string): number {
   return n;
 }
 
+/** An optional env var with a fallback; blank/undefined → the fallback. */
+function optional(name: string, fallback: string): string {
+  const v = process.env[name];
+  return v === undefined || v.trim() === "" ? fallback : v.trim();
+}
+
+/** An optional boolean env var (`true`/`false`/`1`/`0`); default on blank. */
+function optionalBool(name: string, fallback: boolean): boolean {
+  const v = process.env[name];
+  if (v === undefined || v.trim() === "") return fallback;
+  return /^(true|1|yes|on)$/i.test(v.trim());
+}
+
 export function loadConfig(): Config {
   const config: Config = {
     // Subscription auth: a long-lived OAuth token minted with `claude
@@ -98,6 +130,9 @@ export function loadConfig(): Config {
     maxBudgetPerCaseUsd: requiredFloat("MAX_BUDGET_PER_CASE_USD"),
     centralApiBaseUrl: required("CENTRAL_API_BASE_URL"),
     agentWorkerToken: required("AGENT_WORKER_TOKEN"),
+
+    workerId: optional("WORKER_ID", `${hostname()}-${process.pid}`),
+    leasingEnabled: optionalBool("AGENT_LEASING_ENABLED", true),
   };
 
   return config;
