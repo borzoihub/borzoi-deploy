@@ -130,8 +130,8 @@ export interface RepoTaskRow {
   /** Notional USD spent on this repo sub-task (for per-repo cost breakdown). */
   costUsd: number;
   /**
-   * The review read-pass was cut off by the budget/turn ceiling before it could
-   * vouch for the diff. The work still ships (a soft-fail), but the case-close
+   * The review read-pass was cut off by the per-case budget ceiling before it
+   * could vouch for the diff. The work still ships (a soft-fail), but the case-close
    * comment is annotated so a human knows the automated review was incomplete.
    */
   reviewIncomplete: boolean;

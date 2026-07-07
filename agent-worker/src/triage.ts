@@ -57,15 +57,9 @@ export interface TriageResult {
   reason: string;
   /** Notional USD this triage session cost (added to the case envelope). */
   costUsd: number;
-  /** Triage was cut off by the budget/turn ceiling — the verdict is unreliable. */
+  /** Triage was cut off by the per-case budget ceiling — the verdict is unreliable. */
   limitHit: boolean;
 }
-
-// Triage may read across several repos to spot cross-repo (`*-common`) work, so
-// it needs more turns than a single-file glance. This is only a secondary
-// backstop now — the per-case USD budget is the primary guard — so keep it
-// generous enough that the budget binds first.
-const TRIAGE_MAX_TURNS = 40;
 
 /**
  * Decide whether a support case should be fixed in code and, if so, in which
@@ -90,13 +84,12 @@ export async function triage(
     cwd: reposDir,
     systemPrompt: triageSystemPrompt(availableRepoKeys, maintainerOverride),
     prompt: triagePrompt(issue),
-    maxTurns: TRIAGE_MAX_TURNS,
     maxBudgetUsd: budgetUsd,
     dataQuery: { issueNumber: issue.number },
     outputSchema: z.toJSONSchema(TriageSchema) as Record<string, unknown>,
   });
 
-  // Budget/turn ceiling: the verdict can't be trusted (often no structured
+  // Budget ceiling: the verdict can't be trusted (often no structured
   // output at all). Surface it so the case hard-fails to needs-human, not a
   // bogus won't-fix close.
   if (result.limitHit) {
@@ -108,7 +101,7 @@ export async function triage(
       // never reaches branch creation, so changeKind/branchSlug are unused.
       changeKind: "bugfix",
       branchSlug: "fix",
-      reason: "Triage was cut off by the budget/turn ceiling before reaching a verdict.",
+      reason: "Triage was cut off by the per-case budget ceiling before reaching a verdict.",
       costUsd: result.costUsd,
       limitHit: true,
     };

@@ -417,12 +417,16 @@ export class Pipeline {
 
   /** Hard-fail one repo because the case ran out of budget during a phase. */
   private async outOfBudgetRepo(issue: IssueDetail, task: RepoTaskRow, phaseLabel: string): Promise<void> {
-    const spent = (await this.deps.state.get(issue.number))?.costUsd ?? 0;
+    const row = await this.deps.state.get(issue.number);
+    const spent = row?.costUsd ?? 0;
+    // Report the budget actually in force for THIS case (its per-case override
+    // when set, else the global cap) — not the global default.
+    const cap = this.effectiveBudget(row);
     const branchNote = task.branch ? ` Any committed work is on branch \`${task.branch}\`.` : "";
     await this.needsHumanRepo(
       issue,
       task,
-      `Hit the $${this.deps.config.maxBudgetPerCaseUsd.toFixed(0)} per-case budget during ${phaseLabel} ` +
+      `Hit the $${cap.toFixed(0)} per-case budget during ${phaseLabel} ` +
         `(spent $${spent.toFixed(2)} on the case).${branchNote}`,
     );
   }
@@ -1118,7 +1122,7 @@ export class Pipeline {
       // fresh session continues it instead of starting blind. Empty for genuinely
       // fresh work (clean worktree off base).
       const priorWork = priorWorkSummary(repo, branch, base);
-      const result = await implement(this.deps.runner, this.deps.config, issue, worktree, budget, scope, priorWork, base);
+      const result = await implement(this.deps.runner, issue, worktree, budget, scope, priorWork, base);
       await this.charge(issue.number, task.repoKey, result.costUsd, `implement (${task.repoKey})`);
       if (result.blocked) return this.parkRepo(issue, task, "IMPLEMENT", result);
       // A fix that didn't finish can't ship — hard-fail (the partial work stays
@@ -1162,7 +1166,6 @@ export class Pipeline {
         await this.recordActivity(issue.number, "implement", task.repoKey);
         const fix = await implement(
           this.deps.runner,
-          this.deps.config,
           issue,
           worktree,
           fixBudget,
@@ -1216,7 +1219,7 @@ export class Pipeline {
           }
           const fixBudget = await this.budgetRemaining(issue.number);
           if (fixBudget < MIN_SESSION_BUDGET_USD) return this.outOfBudgetRepo(issue, task, "review fixes");
-          const fix = await reviewFix(this.deps.runner, this.deps.config, issue, worktree, blocking, fixBudget, scope);
+          const fix = await reviewFix(this.deps.runner, issue, worktree, blocking, fixBudget, scope);
           await this.charge(issue.number, task.repoKey, fix.costUsd, `review-fix (${task.repoKey})`);
           if (fix.blocked) return this.parkRepo(issue, task, "REVIEW", fix);
           // Unaddressed blocking findings shouldn't ship — hard-fail (unlike the
@@ -1429,7 +1432,6 @@ export class Pipeline {
         resume: task.sessionId,
         prompt: resumeWithAnswerPrompt(reply.body, base),
         enableAskHuman: true,
-        maxTurns: this.deps.config.maxImplementTurns,
         maxBudgetUsd: budget,
       });
       await this.charge(issue.number, task.repoKey, result.costUsd, `resume (${task.repoKey})`);
@@ -1569,17 +1571,17 @@ export class Pipeline {
         attempts++;
         const budget = await this.budgetRemaining(issue.number);
         if (budget < MIN_SESSION_BUDGET_USD) {
+          const cap = this.effectiveBudget(await this.deps.state.get(issue.number));
           this.deps.github.replyOnPr(
             slug,
             prNumber,
-            `🤖 I started on this feedback but hit the $${this.deps.config.maxBudgetPerCaseUsd.toFixed(0)} ` +
+            `🤖 I started on this feedback but hit the $${cap.toFixed(0)} ` +
               "per-case budget before finishing. Leaving it for a maintainer.",
           );
           break;
         }
         const result = await addressPrFeedback(
           this.deps.runner,
-          this.deps.config,
           issue,
           worktree,
           budget,

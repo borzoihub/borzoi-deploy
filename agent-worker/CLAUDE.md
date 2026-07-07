@@ -195,19 +195,21 @@ list: `CLAUDE_CODE_OAUTH_TOKEN` / `MODEL`, `GH_TOKEN` / `BOT_GH_LOGIN` /
 `SUPPORT_REPO`, `REPOS_DIR`, the central-backend connection
 (`CENTRAL_API_BASE_URL` / `AGENT_WORKER_TOKEN`), and the behaviour knobs
 (`POLL_INTERVAL_SEC`, `MAX_REVIEW_ITERS`, `MAX_TEST_ATTEMPTS`,
-`MAX_IMPLEMENT_TURNS`, `MAX_BUDGET_PER_CASE_USD`).
+`MAX_BUDGET_PER_CASE_USD`).
 The worker refuses to start if `CLAUDE_CODE_OAUTH_TOKEN` or `MODEL`
 is missing.
 
 ### Per-case cost budget
 
-`MAX_BUDGET_PER_CASE_USD` is the **primary** runaway guard: a hard ceiling on the
+`MAX_BUDGET_PER_CASE_USD` is the **sole** runaway guard: a hard ceiling on the
 notional API cost of resolving one case, summed across every Agent SDK session it
-runs. The per-session turn caps (`MAX_IMPLEMENT_TURNS`, and the read-pass turn
-constants in `triage.ts` / `implement.ts` / `review.ts`) are now only a secondary
-backstop, kept generous so the budget binds first. Each session is given the
-case's *remaining* envelope as its `maxBudgetUsd`, so spend can't exceed the
-ceiling. Cost is "notional" (billing is via a Claude subscription, not per-token),
+runs. There is **no turn cap** — sessions set only `maxBudgetUsd`, so a complex
+(and therefore expensive) task runs until it finishes or spends the budget;
+"many turns" just means "hard problem", which the dollar ceiling already bounds.
+Each session is given the case's *remaining* envelope as its `maxBudgetUsd`, so
+spend can't exceed the ceiling. Advanced portal cases may raise their own ceiling
+above `MAX_BUDGET_PER_CASE_USD` via a stored per-case `budgetUsd` override.
+Cost is "notional" (billing is via a Claude subscription, not per-token),
 but it's a faithful proxy for tokens spent — the real scarce resource against the
 plan's rolling/weekly caps.
 

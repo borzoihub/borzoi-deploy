@@ -32,15 +32,16 @@ export interface Config {
   pollIntervalSec: number;
   maxReviewIters: number;
   maxTestAttempts: number;
-  maxImplementTurns: number;
   /**
    * Hard ceiling on the notional API cost (USD) of resolving ONE support case,
    * summed across every Agent SDK session it runs (triage + per-repo
-   * implement/test/review/fix loops). It is the primary runaway guard — the
-   * per-session turn caps are only a secondary backstop. The cost is "notional"
-   * because the SDK authenticates against a Claude subscription (no per-token
-   * billing), but it's a faithful proxy for tokens spent, which is the real
-   * scarce resource against the plan's rolling/weekly usage caps.
+   * implement/test/review/fix loops). It is the SOLE per-session ceiling — we
+   * set no `maxTurns`, so a complex (= expensive) task runs until it finishes or
+   * spends this budget. The cost is "notional" because the SDK authenticates
+   * against a Claude subscription (no per-token billing), but it's a faithful
+   * proxy for tokens spent, which is the real scarce resource against the plan's
+   * rolling/weekly usage caps. Per-case advanced portal cases may raise it via a
+   * stored `budgetUsd` override (see effectiveBudget in pipeline.ts).
    */
   maxBudgetPerCaseUsd: number;
 
@@ -126,7 +127,6 @@ export function loadConfig(): Config {
     pollIntervalSec: requiredInt("POLL_INTERVAL_SEC"),
     maxReviewIters: requiredInt("MAX_REVIEW_ITERS"),
     maxTestAttempts: requiredInt("MAX_TEST_ATTEMPTS"),
-    maxImplementTurns: requiredInt("MAX_IMPLEMENT_TURNS"),
     maxBudgetPerCaseUsd: requiredFloat("MAX_BUDGET_PER_CASE_USD"),
     centralApiBaseUrl: required("CENTRAL_API_BASE_URL"),
     agentWorkerToken: required("AGENT_WORKER_TOKEN"),

@@ -46,7 +46,6 @@ export interface RunOptions {
   cwd: string;
   prompt: string;
   systemPrompt?: string;
-  maxTurns?: number;
   /**
    * Notional USD budget for THIS session. The SDK stops the agent loop once the
    * session's cost exceeds it, returning an `error_max_budget_usd` result. The
@@ -82,20 +81,24 @@ export interface RunResult {
   /** Notional USD this session cost (from the SDK's `total_cost_usd`); 0 if unknown. */
   costUsd: number;
   /**
-   * The session stopped because it hit a budget/turn ceiling
-   * (`error_max_budget_usd` / `error_max_turns`) rather than finishing or
-   * crashing. Callers route this distinctly: hard-fail for implement/test/fix,
-   * soft-fail (proceed) for the advisory review read-pass.
+   * The session stopped because it hit its `maxBudgetUsd` ceiling
+   * (`error_max_budget_usd`) rather than finishing or crashing. The per-case USD
+   * budget is the ONLY session ceiling — we set no `maxTurns`, so a complex (=
+   * expensive) task runs until it's done or the budget is spent. Callers route
+   * this distinctly: hard-fail for implement/test/fix, soft-fail (proceed) for
+   * the advisory review read-pass.
    */
   limitHit: boolean;
 }
 
 /**
  * Result subtypes the SDK emits when a session is cut off by a ceiling rather
- * than failing. NOTE: on these the SDK yields this result message AND THEN
- * throws `Error: Claude Code returned an error result: Reached maximum ...`
- * after the stream — so we both read the subtype here and swallow the matching
- * throw in the catch below.
+ * than failing. In practice only `error_max_budget_usd` fires — we set no
+ * `maxTurns` — but `error_max_turns` is kept here defensively in case the SDK
+ * ever imposes an internal turn ceiling of its own. NOTE: on these the SDK
+ * yields this result message AND THEN throws `Error: Claude Code returned an
+ * error result: Reached maximum ...` after the stream — so we both read the
+ * subtype here and swallow the matching throw in the catch below.
  */
 const LIMIT_SUBTYPES = new Set(["error_max_turns", "error_max_budget_usd"]);
 const LIMIT_THROW_RE = /Reached maximum (number of turns|budget)/i;
@@ -185,9 +188,6 @@ export class ClaudeRunner {
     if (opts.systemPrompt !== undefined) {
       options.systemPrompt = opts.systemPrompt;
     }
-    if (opts.maxTurns !== undefined) {
-      options.maxTurns = opts.maxTurns;
-    }
     if (opts.maxBudgetUsd !== undefined) {
       options.maxBudgetUsd = opts.maxBudgetUsd;
     }
@@ -230,7 +230,7 @@ export class ClaudeRunner {
     };
 
     console.log(
-      `[claude] ${label}: starting session (model ${this.config.model}, maxTurns ${opts.maxTurns ?? "default"}` +
+      `[claude] ${label}: starting session (model ${this.config.model}` +
         `${opts.maxBudgetUsd !== undefined ? `, budget $${opts.maxBudgetUsd.toFixed(2)}` : ""}` +
         `${wantsStructured ? ", structured output" : ""})`,
     );

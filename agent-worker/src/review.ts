@@ -1,6 +1,5 @@
 import { z } from "zod";
 import type { ClaudeRunner, RunResult } from "./claude.js";
-import type { Config } from "./config.js";
 import type { IssueDetail } from "./github.js";
 import {
   reviewSystemPrompt,
@@ -42,17 +41,13 @@ export interface ReviewResult {
   /** Notional USD this review session cost (added to the case envelope). */
   costUsd: number;
   /**
-   * The review read-pass was cut off by the budget/turn ceiling before it could
-   * emit findings. The read-pass is advisory, so callers SOFT-fail this (ship the
-   * already-tested work, annotate the close) rather than handing off to a human.
+   * The review read-pass was cut off by the per-case budget ceiling before it
+   * could emit findings. The read-pass is advisory, so callers SOFT-fail this
+   * (ship the already-tested work, annotate the close) rather than handing off
+   * to a human.
    */
   limitHit: boolean;
 }
-
-// Only a secondary backstop now — the per-case USD budget is the primary guard.
-// Generous so a large diff (e.g. the mobile app) can be read across all five
-// perspectives without the turn cap cutting the read-pass short.
-const REVIEW_MAX_TURNS = 60;
 
 export function isBlocking(finding: Finding): boolean {
   return finding.severity === "Critical" || finding.severity === "Important";
@@ -69,7 +64,6 @@ export async function review(
     cwd: worktreePath,
     systemPrompt: reviewSystemPrompt(),
     prompt: reviewPrompt(base),
-    maxTurns: REVIEW_MAX_TURNS,
     maxBudgetUsd: budgetUsd,
     outputSchema: z.toJSONSchema(ReviewSchema) as Record<string, unknown>,
   });
@@ -100,7 +94,6 @@ export function formatFindings(findings: Finding[]): string {
 /** Run a session that fixes the given blocking findings and commits. */
 export async function reviewFix(
   runner: ClaudeRunner,
-  config: Config,
   issue: IssueDetail,
   worktreePath: string,
   findings: Finding[],
@@ -112,7 +105,6 @@ export async function reviewFix(
     cwd: worktreePath,
     systemPrompt: reviewFixSystemPrompt(issue, scope),
     prompt: reviewFixPrompt(formatFindings(findings)),
-    maxTurns: config.maxImplementTurns,
     maxBudgetUsd: budgetUsd,
     enableAskHuman: true,
   });

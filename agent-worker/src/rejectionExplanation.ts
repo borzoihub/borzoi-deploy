@@ -6,7 +6,7 @@ import { rejectionExplanationSystemPrompt, rejectionExplanationPrompt } from "./
 /**
  * Generic, always-safe fallback shown to the homeowner when the dedicated pass
  * can't produce a sanitised explanation (session error, or cut off by the
- * budget/turn ceiling). We deliberately fall back to THIS rather than the raw
+ * budget ceiling). We deliberately fall back to THIS rather than the raw
  * internal triage `reason` — the whole point of the pass is that the internal
  * rationale must never reach the customer unfiltered.
  */
@@ -23,16 +23,12 @@ export interface RejectionExplanationResult {
   costUsd: number;
 }
 
-// A single rewrite turn plus a little headroom for the structured-output call.
-// This pass never reads the repos, so it should converge almost immediately.
-const REJECTION_MAX_TURNS = 4;
-
 /**
  * Rewrite triage's internal rejection rationale into a short, honest,
  * non-technical explanation that is safe to show the homeowner verbatim as "why
  * your case was declined". Runs with no repo/data tools and relies solely on the
  * text passed in. On any failure (session error, malformed output, or a
- * budget/turn cutoff) it returns {@link SAFE_REJECTION_FALLBACK} rather than
+ * budget cutoff) it returns {@link SAFE_REJECTION_FALLBACK} rather than
  * leaking the raw internal reason — the caller still gets a usable, safe string.
  */
 export async function explainRejection(
@@ -47,14 +43,13 @@ export async function explainRejection(
     cwd: reposDir,
     systemPrompt: rejectionExplanationSystemPrompt(),
     prompt: rejectionExplanationPrompt(issue, internalReason),
-    maxTurns: REJECTION_MAX_TURNS,
     maxBudgetUsd: budgetUsd,
     outputSchema: z.toJSONSchema(ExplanationSchema) as Record<string, unknown>,
   });
 
   if (result.limitHit || result.isError) {
     console.warn(
-      `[reject-explain] #${issue.number}: ${result.limitHit ? "budget/turn cutoff" : "session error"} — ` +
+      `[reject-explain] #${issue.number}: ${result.limitHit ? "budget cutoff" : "session error"} — ` +
         "using safe fallback explanation.",
     );
     return { explanation: SAFE_REJECTION_FALLBACK, costUsd: result.costUsd };

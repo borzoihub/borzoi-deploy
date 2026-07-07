@@ -1,6 +1,5 @@
 import { z } from "zod";
 import type { ClaudeRunner, RunResult } from "./claude.js";
-import type { Config } from "./config.js";
 import type { IssueDetail, PrComment } from "./github.js";
 import {
   implementSystemPrompt,
@@ -33,18 +32,12 @@ export interface VerifyResult {
   summary: string;
   /** Notional USD this verify session cost (added to the case envelope). */
   costUsd: number;
-  /** Verification was cut off by the budget/turn ceiling before reaching a verdict. */
+  /** Verification was cut off by the per-case budget ceiling before reaching a verdict. */
   limitHit: boolean;
 }
 
-// Test-verify only has to work out how a repo runs its tests and run them — but
-// a complex repo (install, build, slow suite) can legitimately take a while, so
-// keep this generous. The per-case USD budget is the real guard.
-const VERIFY_MAX_TURNS = 60;
-
 export async function implement(
   runner: ClaudeRunner,
-  config: Config,
   issue: IssueDetail,
   worktreePath: string,
   budgetUsd: number,
@@ -57,7 +50,6 @@ export async function implement(
     cwd: worktreePath,
     systemPrompt: implementSystemPrompt(issue, scope, priorWork, base),
     prompt: implementPrompt(),
-    maxTurns: config.maxImplementTurns,
     maxBudgetUsd: budgetUsd,
     enableAskHuman: true,
     dataQuery: { issueNumber: issue.number },
@@ -75,7 +67,6 @@ export async function implement(
  */
 export async function addressPrFeedback(
   runner: ClaudeRunner,
-  config: Config,
   issue: IssueDetail,
   worktreePath: string,
   budgetUsd: number,
@@ -88,7 +79,6 @@ export async function addressPrFeedback(
     cwd: worktreePath,
     systemPrompt: prFeedbackSystemPrompt(issue, scope, feedback, base),
     prompt: prFeedbackPrompt(),
-    maxTurns: config.maxImplementTurns,
     maxBudgetUsd: budgetUsd,
     enableAskHuman: false,
   });
@@ -103,7 +93,6 @@ export async function verifyTests(
     cwd: worktreePath,
     systemPrompt: verifyTestsSystemPrompt(),
     prompt: verifyTestsPrompt(),
-    maxTurns: VERIFY_MAX_TURNS,
     maxBudgetUsd: budgetUsd,
     outputSchema: z.toJSONSchema(VerifySchema) as Record<string, unknown>,
   });
@@ -111,7 +100,7 @@ export async function verifyTests(
   if (result.limitHit) {
     return {
       passed: false,
-      summary: "Test-verification was cut off by the budget/turn ceiling.",
+      summary: "Test-verification was cut off by the per-case budget ceiling.",
       costUsd: result.costUsd,
       limitHit: true,
     };
