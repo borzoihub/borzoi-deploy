@@ -404,11 +404,27 @@ async function main(): Promise<void> {
   let stopping = false;
   // Set while idle so the signal handler can cut the poll sleep short.
   let wake: (() => void) | undefined;
+  // Release any held leases before dying so a restart doesn't wait out the TTL.
+  // Bounded so an unreachable central can't hang the exit — a leaked lease self-
+  // heals via its TTL, but a wedged shutdown does not.
+  const releaseAndExit = async (code: number): Promise<never> => {
+    try {
+      await Promise.race([
+        pipeline.releaseAll(),
+        new Promise((r) => setTimeout(r, 2000)),
+      ]);
+    } catch {
+      /* best-effort — never block exit on a release failure */
+    }
+    process.exit(code);
+  };
   const shutdown = (signal: string) => {
     if (stopping) {
-      // Second Ctrl-C/SIGTERM: don't wait for graceful unwind — force out.
-      console.log(`[${ts()}] ${signal} again — forcing exit.`);
-      process.exit(130);
+      // Second Ctrl-C/SIGTERM: skip the graceful unwind, but still make a
+      // best-effort (bounded) lease release on the way out.
+      console.log(`[${ts()}] ${signal} again — forcing exit (releasing held leases first).`);
+      void releaseAndExit(130);
+      return;
     }
     stopping = true;
     console.log(
@@ -442,6 +458,11 @@ async function main(): Promise<void> {
     });
   }
 
+  // Graceful stop: the in-flight tick has unwound (each `underClaim` finally
+  // already released its own lease), but release anything still held so a
+  // restart reclaims immediately instead of waiting out the TTL.
+  const released = await pipeline.releaseAll();
+  if (released > 0) console.log(`[${ts()}] released ${released} held lease(s) on shutdown.`);
   state.close();
   console.log(`[${ts()}] voltini-bugfixer stopped.`);
 }

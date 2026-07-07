@@ -192,6 +192,23 @@ export class Pipeline {
     await this.deps.state.releaseCase(issueNumber, token);
   }
 
+  /**
+   * Release EVERY lease this worker currently holds (best-effort, idempotent).
+   * Called on shutdown so a Ctrl-C / restart doesn't leave a case leased for the
+   * full lease TTL — otherwise the next process (a different `WORKER_ID`, or the
+   * same one racing the stale expiry) sees "held by another worker" until it
+   * lapses. `releaseCase` never throws on a mismatch, so a partial failure here
+   * can't block exit. Returns the count released, for the shutdown log.
+   */
+  async releaseAll(): Promise<number> {
+    const held = [...this.leaseTokens.entries()];
+    this.leaseTokens.clear();
+    await Promise.allSettled(
+      held.map(([issueNumber, token]) => this.deps.state.releaseCase(issueNumber, token)),
+    );
+    return held.length;
+  }
+
   private repoOrThrow(repoKey: string): Repo {
     const repo = findRepo(this.deps.config.reposDir, repoKey);
     if (!repo) {
