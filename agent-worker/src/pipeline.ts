@@ -528,8 +528,20 @@ export class Pipeline {
     this.deps.github.acknowledgeCommand(cmd.id);
     this.narrate(
       issue.number,
-      `Maintainer @${cmd.author} requested \`${RETRY_COMMAND}\` — re-arming with a fresh $${this.deps.config.maxBudgetPerCaseUsd.toFixed(0)} budget.`,
+      `Maintainer @${cmd.author} requested \`${RETRY_COMMAND}\` — re-arming with a fresh $${this.effectiveBudget(row).toFixed(0)} budget.`,
     );
+    await this.reArm(issue, `@${cmd.author}`);
+  }
+
+  /**
+   * Re-arm a parked (needs-human / won't-fix) case for another attempt: reset the
+   * attempt budget (lifetime total is preserved by addCost's separate column),
+   * un-stick every given-up repo sub-task, drop the hand-off labels, and re-enter
+   * the normal recover→work path at NEW. Shared by the maintainer `/retry` comment
+   * and the portal `retry` command. `attribution` names who asked, for the issue
+   * comment (e.g. `@alice` or `the installer portal`).
+   */
+  private async reArm(issue: IssueDetail, attribution: string): Promise<void> {
     // Fresh attempt budget (lifetime total is kept by addCost's separate column).
     await this.deps.state.update(issue.number, { costUsd: 0, error: null, needsHumanCommentId: null });
     // Un-stick every sub-task that had given up, so the retry actually re-attempts
@@ -546,11 +558,14 @@ export class Pipeline {
         });
       }
     }
+    // A won't-fix case is CLOSED — reopen it so it's visible/actionable again.
+    if (issue.state === "closed") this.deps.github.reopenIssue(issue.number);
     // Drop both labels + phase to NEW so the next processCase enters recovery.
     this.deps.github.removeLabel(issue.number, LABEL_NEEDS_HUMAN);
+    this.deps.github.removeLabel(issue.number, LABEL_WONTFIX);
     this.deps.github.removeLabel(issue.number, LABEL_IN_PROGRESS);
     await this.setPhase(issue.number, "NEW");
-    this.deps.github.comment(issue.number, `🤖 Retrying this case now (requested by @${cmd.author}).`);
+    this.deps.github.comment(issue.number, `🤖 Retrying this case now (requested by ${attribution}).`);
 
     await this.processCase(issue, (await this.deps.state.get(issue.number))!);
   }
@@ -1418,8 +1433,7 @@ export class Pipeline {
       const reply = this.deps.github.humanReplyAfter(issue.number, row.needsHumanCommentId);
       if (!reply) return; // still awaiting approval
       this.narrate(issue.number, "Plan approved by a maintainer — starting implementation…");
-      await this.setPhase(issue.number, "WORKING", { needsHumanCommentId: null });
-      await this.processCase(issue, (await this.deps.state.get(issue.number))!);
+      await this.startPlanImplementation(issue);
       return;
     }
 
@@ -1431,50 +1445,210 @@ export class Pipeline {
       if (!task.blockedCommentId || !task.sessionId || !task.branch || !task.resumePhase) continue;
       const reply = this.deps.github.humanReplyAfter(issue.number, task.blockedCommentId);
       if (!reply) continue; // still waiting on this one
-
-      this.narrate(issue.number, `Got a human reply for "${task.repoKey}" — resuming…`);
-      const repo = this.repoOrThrow(task.repoKey);
-      const base = defaultBranch(repo);
-      const worktree = ensureWorktree(repo, task.branch, base);
-
-      const budget = await this.budgetRemaining(issue.number);
-      if (budget < MIN_SESSION_BUDGET_USD) {
-        await this.outOfBudgetRepo(issue, task, "the resumed session");
-        resumedAny = true;
-        continue;
-      }
-      const result = await this.deps.runner.run({
-        label: `resume #${issue.number} (${task.repoKey})`,
-        cwd: worktree,
-        resume: task.sessionId,
-        prompt: resumeWithAnswerPrompt(reply.body, base),
-        enableAskHuman: true,
-        maxBudgetUsd: budget,
-      });
-      await this.charge(issue.number, task.repoKey, result.costUsd, `resume (${task.repoKey})`);
-      if (result.blocked) {
-        await this.parkRepo(issue, task, task.resumePhase, result);
-        continue;
-      }
-      if (result.limitHit) {
-        await this.outOfBudgetRepo(issue, task, "the resumed session");
-        resumedAny = true;
-        continue;
-      }
-      if (result.isError) {
-        await this.needsHumanRepo(issue, task, "The resumed session errored out.");
-        resumedAny = true;
-        continue;
-      }
-      // Resumed work done; re-enter this repo at the next phase.
-      const nextPhase: RepoPhase = task.resumePhase === "IMPLEMENT" ? "TEST" : "REVIEW";
-      await this.setRepoPhase(issue.number, task.repoKey, nextPhase, { blockedCommentId: null });
-      resumedAny = true;
+      if (await this.resumeBlockedTaskWithAnswer(issue, task, reply.body)) resumedAny = true;
     }
 
     if (resumedAny) {
       await this.setPhase(issue.number, "WORKING");
       await this.processCase(issue, (await this.deps.state.get(issue.number))!);
+    }
+  }
+
+  /**
+   * Approve a plan-first (`planOnly`) case parked at BLOCKED awaiting review: drop
+   * to WORKING and let the normal implement loop drive its BRANCH tasks. Shared by
+   * the maintainer's issue reply and the portal `approve` command.
+   */
+  private async startPlanImplementation(issue: IssueDetail): Promise<void> {
+    await this.setPhase(issue.number, "WORKING", { needsHumanCommentId: null });
+    await this.processCase(issue, (await this.deps.state.get(issue.number))!);
+  }
+
+  /**
+   * Resume ONE BLOCKED repo sub-task's parked Agent SDK session with a human
+   * answer, routing the outcome (done → next phase, re-blocked → park, budget →
+   * out-of-budget, error → needs-human) exactly as the reply-driven path does.
+   * Shared by the maintainer's GitHub reply and the portal `guidance` command.
+   * Returns true when the task advanced (i.e. the case should re-process), false
+   * when it re-parked. Callers must pre-check `blockedCommentId/sessionId/branch/
+   * resumePhase` are set.
+   */
+  private async resumeBlockedTaskWithAnswer(
+    issue: IssueDetail,
+    task: RepoTaskRow,
+    answer: string,
+  ): Promise<boolean> {
+    this.narrate(issue.number, `Got a reply for "${task.repoKey}" — resuming…`);
+    const repo = this.repoOrThrow(task.repoKey);
+    const base = defaultBranch(repo);
+    const worktree = ensureWorktree(repo, task.branch!, base);
+
+    const budget = await this.budgetRemaining(issue.number);
+    if (budget < MIN_SESSION_BUDGET_USD) {
+      await this.outOfBudgetRepo(issue, task, "the resumed session");
+      return true;
+    }
+    const result = await this.deps.runner.run({
+      label: `resume #${issue.number} (${task.repoKey})`,
+      cwd: worktree,
+      resume: task.sessionId!,
+      prompt: resumeWithAnswerPrompt(answer, base),
+      enableAskHuman: true,
+      maxBudgetUsd: budget,
+    });
+    await this.charge(issue.number, task.repoKey, result.costUsd, `resume (${task.repoKey})`);
+    if (result.blocked) {
+      await this.parkRepo(issue, task, task.resumePhase!, result);
+      return false;
+    }
+    if (result.limitHit) {
+      await this.outOfBudgetRepo(issue, task, "the resumed session");
+      return true;
+    }
+    if (result.isError) {
+      await this.needsHumanRepo(issue, task, "The resumed session errored out.");
+      return true;
+    }
+    // Resumed work done; re-enter this repo at the next phase.
+    const nextPhase: RepoPhase = task.resumePhase === "IMPLEMENT" ? "TEST" : "REVIEW";
+    await this.setRepoPhase(issue.number, task.repoKey, nextPhase, { blockedCommentId: null });
+    return true;
+  }
+
+  /**
+   * Consume a portal-driven operator command queued on the case in central
+   * (`retry` / `approve` / `guidance` / `pr_feedback`) and clear it. This is the
+   * portal-side equivalent of the maintainer's GitHub-native triggers (a `/retry`
+   * comment, a reply approving a plan, an @-mention on a PR): the installer portal
+   * records the operator's intent on the case row rather than commenting on
+   * GitHub, and the worker acts on it here. The command is cleared FIRST so a
+   * crash mid-action can't re-fire it every tick (mirrors the 👀-react-first
+   * idempotency of the comment paths). Returns true when a command was present
+   * (whether or not it applied), so the caller skips the case's other passes.
+   */
+  async consumePendingCommand(issue: IssueDetail, row: CaseRow): Promise<boolean> {
+    const command = row.pendingCommand;
+    if (!command) return false;
+    const note = row.commandNote?.trim() || null;
+    const repoKey = row.commandRepoKey?.trim() || null;
+    // Clear up front: the operator's intent is recorded, and re-firing it on a
+    // crash/restart would re-spend budget. A dropped command is re-issuable from
+    // the portal; a repeated one is not safe.
+    await this.deps.state.update(issue.number, {
+      pendingCommand: null,
+      commandNote: null,
+      commandRepoKey: null,
+    });
+
+    switch (command) {
+      case "retry": {
+        if (row.phase !== "NEEDS_HUMAN" && row.phase !== "WONTFIX") {
+          console.warn(`[command] #${issue.number}: portal retry ignored — phase ${row.phase} is not a parked state.`);
+          return true;
+        }
+        this.narrate(
+          issue.number,
+          `Retry requested via the installer portal — re-arming with a fresh $${this.effectiveBudget(row).toFixed(0)} budget.`,
+        );
+        await this.reArm(issue, "the installer portal");
+        return true;
+      }
+      case "approve": {
+        const tasks = await this.deps.state.getRepoTasks(issue.number);
+        if (!(row.planOnly && row.phase === "BLOCKED" && !tasks.some((t) => t.phase === "BLOCKED"))) {
+          console.warn(`[command] #${issue.number}: portal approve ignored — not a plan awaiting approval (phase ${row.phase}).`);
+          return true;
+        }
+        this.narrate(issue.number, "Plan approved via the installer portal — starting implementation…");
+        this.deps.github.comment(issue.number, "🔧 Plan approved via the installer portal — implementation starting.");
+        await this.startPlanImplementation(issue);
+        return true;
+      }
+      case "guidance": {
+        if (!note) {
+          console.warn(`[command] #${issue.number}: portal guidance ignored — no note.`);
+          return true;
+        }
+        // Record the operator's steer on the issue for the audit trail.
+        this.deps.github.comment(issue.number, `📝 Guidance via the installer portal:\n\n${note}`);
+        const tasks = await this.deps.state.getRepoTasks(issue.number);
+        const blocked = tasks.filter(
+          (t) => t.phase === "BLOCKED" && t.blockedCommentId && t.sessionId && t.branch && t.resumePhase,
+        );
+        if (blocked.length > 0) {
+          // Answer the bot's open ask_human question(s) with the operator's guidance.
+          let resumedAny = false;
+          for (const task of blocked) {
+            if (await this.resumeBlockedTaskWithAnswer(issue, task, note)) resumedAny = true;
+          }
+          if (resumedAny) {
+            await this.setPhase(issue.number, "WORKING");
+            await this.processCase(issue, (await this.deps.state.get(issue.number))!);
+          }
+          return true;
+        }
+        if (row.planOnly && row.phase === "BLOCKED") {
+          // Guidance on a plan-review case = approve-with-steer: proceed to implement
+          // (the note is on the issue for the implementer's context).
+          this.narrate(issue.number, "Guidance on the plan via the installer portal — starting implementation…");
+          await this.startPlanImplementation(issue);
+          return true;
+        }
+        if (row.phase === "NEEDS_HUMAN" || row.phase === "WONTFIX") {
+          // Guidance on a parked case: re-arm so it re-attempts, with the steer recorded.
+          this.narrate(issue.number, "Guidance via the installer portal — re-arming the case…");
+          await this.reArm(issue, "the installer portal");
+          return true;
+        }
+        console.warn(
+          `[command] #${issue.number}: portal guidance recorded on the issue but no open question/plan to apply it to (phase ${row.phase}).`,
+        );
+        return true;
+      }
+      case "pr_feedback": {
+        if (!note) {
+          console.warn(`[command] #${issue.number}: portal pr_feedback ignored — no note.`);
+          return true;
+        }
+        await this.addressPortalPrFeedback(issue, repoKey, note);
+        return true;
+      }
+      default:
+        console.warn(`[command] #${issue.number}: unknown portal command "${command}" — cleared and ignored.`);
+        return true;
+    }
+  }
+
+  /**
+   * Portal `pr_feedback`: drive a change on an already-opened PR from an operator
+   * note (the portal-side equivalent of an @-mention on the PR). Targets the DONE
+   * repo sub-task named by `repoKey`, or the case's single watchable PR when
+   * unspecified, and reuses the same per-repo feedback session by injecting the
+   * note as the feedback text.
+   */
+  private async addressPortalPrFeedback(
+    issue: IssueDetail,
+    repoKey: string | null,
+    note: string,
+  ): Promise<void> {
+    const watchable = (await this.deps.state.getRepoTasks(issue.number)).filter(
+      (t) => t.phase === "DONE" && t.prUrl,
+    );
+    const targets = repoKey ? watchable.filter((t) => t.repoKey === repoKey) : watchable;
+    if (targets.length === 0) {
+      console.warn(
+        `[command] #${issue.number}: portal pr_feedback has no open PR to apply to` +
+          `${repoKey ? ` for repo "${repoKey}"` : ""}.`,
+      );
+      return;
+    }
+    for (const task of targets) {
+      try {
+        await this.addressPrFeedbackForRepo(issue, task, note);
+      } catch (e) {
+        if (e instanceof ShutdownError) throw e;
+        console.error(`[pr-feedback] #${issue.number} (${task.repoKey}) portal feedback failed:`, e);
+      }
     }
   }
 
@@ -1508,7 +1682,11 @@ export class Pipeline {
   }
 
   /** Handle one PR's outstanding maintainer @-mentions. */
-  private async addressPrFeedbackForRepo(issue: IssueDetail, task: RepoTaskRow): Promise<void> {
+  private async addressPrFeedbackForRepo(
+    issue: IssueDetail,
+    task: RepoTaskRow,
+    injectedNote?: string,
+  ): Promise<void> {
     const repo = findRepo(this.deps.config.reposDir, task.repoKey);
     if (!repo || !task.prUrl || !task.branch) return;
     const slug = repoSlug(repo);
@@ -1517,20 +1695,24 @@ export class Pipeline {
 
     const { state, comments } = this.deps.github.prFeedback(slug, prNumber);
 
-    // Outstanding = mentions the bot, from an authorized maintainer on THIS code
-    // repo, that we haven't already reacted to.
-    const outstanding = feedbackForBot(comments, this.deps.config.botLogin).filter(
-      (c) =>
-        c.id &&
-        this.deps.github.isAuthorizedMaintainer(c.author, slug) &&
-        !this.deps.github.hasBotReacted(c.id),
-    );
+    // Outstanding feedback to act on. From the portal command it's the operator's
+    // note injected as a single synthetic item (no GitHub comment to react to);
+    // otherwise it's every un-reacted @-mention of the bot from an authorized
+    // maintainer on THIS code repo.
+    const outstanding: PrComment[] = injectedNote
+      ? [{ id: "", author: "the installer portal", body: injectedNote, kind: "conversation" }]
+      : feedbackForBot(comments, this.deps.config.botLogin).filter(
+          (c) =>
+            c.id &&
+            this.deps.github.isAuthorizedMaintainer(c.author, slug) &&
+            !this.deps.github.hasBotReacted(c.id),
+        );
 
     // A merged/closed PR can no longer be amended — tell the maintainer (once) and
     // stop watching this PR for good.
     if (state !== "open") {
       if (outstanding.length > 0) {
-        for (const c of outstanding) this.deps.github.acknowledgeCommand(c.id);
+        for (const c of outstanding) if (c.id) this.deps.github.acknowledgeCommand(c.id);
         this.deps.github.replyOnPr(
           slug,
           prNumber,
@@ -1558,8 +1740,9 @@ export class Pipeline {
       issue.number,
       `PR feedback on "${task.repoKey}" (${task.prUrl}): addressing ${outstanding.length} maintainer comment(s).`,
     );
-    // React FIRST so the same comments are never acted on twice.
-    for (const c of outstanding) this.deps.github.acknowledgeCommand(c.id);
+    // React FIRST so the same comments are never acted on twice. (A portal-injected
+    // note has no GitHub comment to react to — skip it.)
+    for (const c of outstanding) if (c.id) this.deps.github.acknowledgeCommand(c.id);
 
     // Surface the follow-up to the customer: the case is resolved (issue closed),
     // so reopen it + mark active — `deriveStatus` on central then reports

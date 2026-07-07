@@ -243,16 +243,44 @@ async function tick(deps: {
     );
   }
 
+  // 0. Consume portal-driven operator commands (retry / approve / guidance /
+  // pr_feedback) queued in central on ANY case — open OR closed (a won't-fix
+  // retry, PR feedback on a resolved case). These are the portal-side equivalent
+  // of a maintainer's GitHub trigger; consumePendingCommand drives the case
+  // itself, so a commanded case is excluded from the phase-based passes below this
+  // tick to avoid double-processing.
+  const commanded = new Set<number>();
+  const withCommand = (await state.all()).filter((r) => r.pendingCommand && !r.paused);
+  for (const row of withCommand) {
+    let consumed = false;
+    try {
+      await underClaim(pipeline, row.issueNumber, async () => {
+        const fresh = await state.get(row.issueNumber);
+        if (fresh) consumed = await pipeline.consumePendingCommand(github.view(row.issueNumber), fresh);
+      });
+    } catch (e) {
+      if (e instanceof ShutdownError) throw e;
+      if (e instanceof PauseError || e instanceof LostLeaseError) continue;
+      console.error(`[${ts()}]   command consume failed for #${row.issueNumber}:`, e);
+    }
+    if (consumed) commanded.add(row.issueNumber);
+  }
+
   // Operator-paused cases are excluded from every work set below: a paused NEW
   // case is never picked up (it stays queued on the dashboard, no customer
   // notification), and a paused case already in flight isn't advanced/resumed/
   // retried/re-armed until the operator resumes it. (A case paused WHILE being
   // worked is stopped from inside processCase's pause watcher, not here.)
+  // `commanded` cases were already driven by pass 0 this tick.
   const parked = (await state.allInPhase("BLOCKED")).filter(
-    (r) => openNumbers.has(r.issueNumber) && !r.paused,
+    (r) => openNumbers.has(r.issueNumber) && !r.paused && !commanded.has(r.issueNumber),
   );
   const actionable = (await state.all()).filter(
-    (r) => ACTIONABLE_PHASES.includes(r.phase) && openNumbers.has(r.issueNumber) && !r.paused,
+    (r) =>
+      ACTIONABLE_PHASES.includes(r.phase) &&
+      openNumbers.has(r.issueNumber) &&
+      !r.paused &&
+      !commanded.has(r.issueNumber),
   );
 
   // 1. Resume any parked case whose human question has been answered.
@@ -273,7 +301,7 @@ async function tick(deps: {
   // /retry. retryIfRequested drives the re-armed case itself, so these don't
   // need to also appear in the actionable pass below.
   const needsHuman = (await state.allInPhase("NEEDS_HUMAN")).filter(
-    (r) => openNumbers.has(r.issueNumber) && !r.paused,
+    (r) => openNumbers.has(r.issueNumber) && !r.paused && !commanded.has(r.issueNumber),
   );
   for (const row of needsHuman) {
     try {
@@ -292,7 +320,9 @@ async function tick(deps: {
   // way to override a won't-fix close ("look at it anyway"). Won't-fix cases are
   // CLOSED, so they're NOT in `open` — fetch them from the journal. needsHuman
   // cases (open, loaded above) get the same @-mention path in addition to /retry.
-  const wontfix = (await state.allInPhase("WONTFIX")).filter((r) => !r.paused);
+  const wontfix = (await state.allInPhase("WONTFIX")).filter(
+    (r) => !r.paused && !commanded.has(r.issueNumber),
+  );
   const rearmable = [...wontfix, ...needsHuman];
   for (const row of rearmable) {
     try {
@@ -342,7 +372,9 @@ async function tick(deps: {
   // are CLOSED, so they are NOT in `open`/`openNumbers` — this pass works off the
   // journal independently. A case is watchable while it has a DONE sub-task with an
   // open PR we haven't stopped watching.
-  const doneCases = (await state.allInPhase("DONE")).filter((r) => !r.paused);
+  const doneCases = (await state.allInPhase("DONE")).filter(
+    (r) => !r.paused && !commanded.has(r.issueNumber),
+  );
   const withPrFeedback: typeof doneCases = [];
   for (const c of doneCases) {
     const tasks = await state.getRepoTasks(c.issueNumber);
