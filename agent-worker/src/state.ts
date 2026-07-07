@@ -94,6 +94,19 @@ export interface CaseRow {
    * sibling is actively driving. `false` for every idle/parked case.
    */
   leased: boolean;
+  /**
+   * A portal-driven maintainer command for the worker to consume this tick:
+   * `approve` (a plan-first case) / `guidance` (adjust scope with `commandNote`)
+   * / `retry` (re-arm with fresh budget) / `pr_feedback` (address `commandNote`).
+   * `null` when none pending. Central (JWT-authorized) is the authority; the
+   * worker acts on this instead of a GitHub comment (its own bot comments are
+   * ignored by design), then clears it. See {@link consumeCommand}.
+   */
+  pendingCommand: string | null;
+  /** Operator text for the command (guidance / PR-feedback body). */
+  commandNote: string | null;
+  /** Repo the command targets (e.g. PR feedback on one repo), or `null`. */
+  commandRepoKey: string | null;
   updatedAt: string;
 }
 
@@ -148,6 +161,9 @@ interface CaseDto {
   budgetUsd: number | null;
   planOnly: boolean;
   leased?: boolean;
+  pendingCommand: string | null;
+  commandNote: string | null;
+  commandRepoKey: string | null;
   updatedAt: string | null;
   repoTasks: RepoTaskDto[];
 }
@@ -192,6 +208,9 @@ function toCaseRow(dto: CaseDto): CaseRow {
     budgetUsd: dto.budgetUsd ?? null,
     planOnly: !!dto.planOnly,
     leased: !!dto.leased,
+    pendingCommand: dto.pendingCommand ?? null,
+    commandNote: dto.commandNote ?? null,
+    commandRepoKey: dto.commandRepoKey ?? null,
     updatedAt: dto.updatedAt ?? "",
   };
 }
