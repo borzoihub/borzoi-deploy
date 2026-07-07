@@ -71,6 +71,12 @@ function capitalize(s: string): string {
   return s.length === 0 ? s : s.charAt(0).toUpperCase() + s.slice(1);
 }
 
+/** Cap a title for a one-line log so a very long issue title can't dominate the tick output. */
+function briefTitle(title: string): string {
+  const t = title.trim();
+  return t.length > 80 ? `${t.slice(0, 79)}…` : t;
+}
+
 /** What the bot will (or won't) do with one repo sub-task, in plain words. */
 function describeRepoTask(t: RepoTaskRow): string {
   switch (t.phase) {
@@ -107,9 +113,9 @@ async function describeTicket(state: StateStore, issueNumber: number): Promise<s
     case "WONTFIX":
       return "Closed as won't-fix (not actionable)";
     case "NEEDS_HUMAN":
-      return `Parked for a human${c.error ? `: ${c.error}` : ""}`;
+      return "Parked for a human";
     case "ABORTED":
-      return `Aborted${c.error ? `: ${c.error}` : ""}`;
+      return "Aborted";
     // DONE and WORKING both describe their actual repo sub-tasks rather than
     // asserting an outcome — the real status lives in the per-repo rows.
     case "DONE":
@@ -211,6 +217,7 @@ async function tick(deps: {
 }): Promise<void> {
   const { github, state, pipeline } = deps;
   const n = ++tickCount;
+  pipeline.beginTick(); // reset per-tick log dedup (e.g. the "held by another worker" line)
 
   // Polling GitHub is itself a network round-trip; announce it so a slow/hung
   // `gh` call is distinguishable from an idle wait.
@@ -239,7 +246,8 @@ async function tick(deps: {
   // to do with it this tick.
   for (const issue of open) {
     console.log(
-      `[${ts()}] tick #${n}: Found ticket #${issue.number}: ${await describeTicket(state, issue.number)}`,
+      `[${ts()}] tick #${n}: Found ticket #${issue.number} "${briefTitle(issue.title)}": ` +
+        `${await describeTicket(state, issue.number)}`,
     );
   }
 

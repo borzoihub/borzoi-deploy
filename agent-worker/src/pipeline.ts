@@ -161,6 +161,16 @@ export class Pipeline {
    *  boundary WITHOUT committing — we no longer own the branch. */
   private readonly lostLeaseIssues = new Set<number>();
 
+  /** Cases already logged "held by another worker" this tick. A held case is
+   *  claimed by several work-set passes (command / retry-watch / mention-watch),
+   *  so this collapses the log to ONE line per case per tick. Cleared per tick. */
+  private readonly heldReportedThisTick = new Set<number>();
+
+  /** Reset the per-tick "held" log dedup. Call once at the top of each poll tick. */
+  beginTick(): void {
+    this.heldReportedThisTick.clear();
+  }
+
   /**
    * Atomically claim the active-work lease on a case before processing it this
    * tick, so no two live workers drive the same case. Returns false when another
@@ -175,7 +185,10 @@ export class Pipeline {
       this.deps.config.workerId,
     );
     if (!acquired) {
-      this.narrate(issueNumber, "Held by another worker — skipping this tick.");
+      if (!this.heldReportedThisTick.has(issueNumber)) {
+        this.narrate(issueNumber, "Held by another worker — skipping this tick.");
+        this.heldReportedThisTick.add(issueNumber);
+      }
       return false;
     }
     if (leaseToken) this.leaseTokens.set(issueNumber, leaseToken);
