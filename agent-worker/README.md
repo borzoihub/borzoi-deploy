@@ -19,6 +19,9 @@ git pull
 # 1. Configure
 cp agent-worker/.env.example agent-worker/.env
 $EDITOR agent-worker/.env                       # CLAUDE_CODE_OAUTH_TOKEN, GH_TOKEN, etc.
+#    GH_TOKEN must be a CLASSIC PAT (`repo` + `read:packages`): the bot works
+#    repos across multiple orgs (borzoihub + digistrada), and a fine-grained PAT
+#    can't cross orgs. SSO-authorize the token for each org that enforces it.
 
 # 2. npm registry auth for `npm ci` (BuildKit secret, never baked into image).
 #    Registry is GitHub Packages today, so this is a GitHub PAT (packages:read).
