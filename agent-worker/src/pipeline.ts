@@ -679,6 +679,19 @@ export class Pipeline {
   /** Mark a single repo sub-task as needing a human; never auto-closes the case. */
   private async needsHumanRepo(issue: IssueDetail, task: RepoTaskRow, message: string): Promise<void> {
     this.narrate(issue.number, `"${task.repoKey}" needs a human: ${message}`);
+    // Guarantee any committed work is on the remote before we hand off. Unlike the
+    // happy-path pushes (after implement/test/review succeed), a needs-human exit —
+    // review didn't converge, tests kept failing, a fix session errored/ran out of
+    // budget — is TERMINAL for this attempt: there is no later PR-push to carry the
+    // branch up. Skipping the push here is what left #37's fix stranded in the
+    // worker's local clone, invisible on GitHub when the maintainer went to look.
+    // Every needs-human / out-of-budget path funnels through here (outOfBudgetRepo
+    // calls this too), so one push covers them all. Best-effort; a clean/absent
+    // branch is a harmless no-op.
+    const repo = findRepo(this.deps.config.reposDir, task.repoKey);
+    if (repo && task.branch && hasWorktree(repo, task.branch)) {
+      this.pushWip(ensureWorktree(repo, task.branch, defaultBranch(repo)), task.branch, `needs-human ${task.repoKey}`);
+    }
     await this.setRepoPhase(issue.number, task.repoKey, "NEEDS_HUMAN", { error: message });
   }
 
