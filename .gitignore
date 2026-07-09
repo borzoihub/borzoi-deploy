@@ -1,6 +1,8 @@
 .env
 .env.backup.*
 .env.theworks
+.env.theworks.be
+.env.theworks.worker
 installer-creds.json
 installer-creds.*.json
 sim-bundle.json

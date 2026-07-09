@@ -27,9 +27,18 @@ name: voltini-theworks
 # retired agent compose, this is internal infrastructure that runs on a dedicated
 # dev/ops box, NEVER on a customer Raspberry Pi.
 #
+# Secrets are split per-service (least privilege): each container is handed only
+# the secrets it uses. See the env example headers for the full rationale.
+#   • .env.theworks         — compose-CLI interpolation only (shared infra + DB
+#                             credential); NOT injected wholesale into a container.
+#   • .env.theworks.be      — injected ONLY into theworks-cases-be.
+#   • .env.theworks.worker  — injected ONLY into theworks-cases-worker.
+#
 # Fresh-box runbook:
 #   1. git pull
-#   2. cp .env.theworks.example .env.theworks   # then fill in secrets
+#   2. cp .env.theworks.example        .env.theworks         # then fill in secrets
+#      cp .env.theworks.be.example     .env.theworks.be      #   (each file holds
+#      cp .env.theworks.worker.example .env.theworks.worker  #    only its service's)
 #   3. mkdir -p theworks-data/repos && git clone the Voltini CODE repos into it
 #      (the worktrees the worker opens PRs against; matches REPOS_DIR).
 #   4. docker compose -f docker-compose.theworks.yml --env-file .env.theworks up -d
@@ -71,7 +80,10 @@ services:
     restart: unless-stopped
     depends_on:
       postgres: { condition: service_healthy }
-    env_file: .env.theworks
+    # Least privilege: ONLY the backend's own secrets (GitHub mirror token, webhook
+    # secret, AWS keys). The worker's Claude/GitHub-PAT/agent tokens are never
+    # injected here. DB creds arrive via the interpolated `environment:` block below.
+    env_file: .env.theworks.be
     environment:
       # Selects config/config.Production.json (casesConfig: voltini, GitHub
       # mirror → borzoihub/voltini-support, outbound status webhook → central).
@@ -94,7 +106,10 @@ services:
     restart: unless-stopped
     depends_on:
       theworks-cases-be: { condition: service_started }
-    env_file: .env.theworks
+    # Least privilege: ONLY the worker's own secrets (Claude OAuth token, worker
+    # GitHub PAT, agentWorker token). The backend's GitHub mirror token, webhook
+    # secret, AWS keys and the Postgres credential are never injected here.
+    env_file: .env.theworks.worker
     environment:
       # The worker talks to theworks-cases-be DIRECTLY (not through central).
       CENTRAL_API_BASE_URL: http://theworks-cases-be:${THEWORKS_CASES_BE_PORT:-3000}

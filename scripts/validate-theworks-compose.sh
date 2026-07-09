@@ -26,24 +26,29 @@ pass "old agent-worker + docker-compose.agent.yml retired"
 [ -f "$THEWORKS_COMPOSE" ] || fail "$THEWORKS_COMPOSE missing"
 [ -f "$INIT_SCRIPT" ]      || fail "$INIT_SCRIPT missing"
 [ -x "$INIT_SCRIPT" ]      || fail "$INIT_SCRIPT is not executable"
-[ -f .env.theworks.example ] || fail ".env.theworks.example missing"
-pass "replacement compose, init script, and env example present"
+[ -f .env.theworks.example ]        || fail ".env.theworks.example missing"
+[ -f .env.theworks.be.example ]     || fail ".env.theworks.be.example missing"
+[ -f .env.theworks.worker.example ] || fail ".env.theworks.worker.example missing"
+pass "replacement compose, init script, and per-service env examples present"
 
 # 3. The new compose is valid and defines the three expected services. `config`
 #    interpolates env; the example file supplies defaults (empty values only warn).
-#    The services reference `.env.theworks` (operator-created at deploy time), so
-#    render against a throwaway copy of the example to fully validate the file.
+#    The services reference per-service `env_file:`s (operator-created at deploy
+#    time), so render against throwaway copies of the examples to fully validate.
 if command -v docker >/dev/null 2>&1; then
-  # The services reference `env_file: .env.theworks` (operator-created at deploy
-  # time). If it is absent, stand up a throwaway copy of the example just for the
-  # render, and remove it again afterwards, so `config` validates the full file.
-  CLEANUP_ENV=0
-  if [ ! -e .env.theworks ]; then
-    cp .env.theworks.example .env.theworks
-    CLEANUP_ENV=1
-  fi
+  # The services reference `env_file: .env.theworks.be` / `.env.theworks.worker`
+  # (operator-created at deploy time). If any is absent, stand up a throwaway copy
+  # of its example just for the render, and remove it again afterwards, so
+  # `config` validates the full file.
+  CLEANUP_ENVS=""
+  for f in .env.theworks.be .env.theworks.worker; do
+    if [ ! -e "$f" ]; then
+      cp "$f.example" "$f"
+      CLEANUP_ENVS="$CLEANUP_ENVS $f"
+    fi
+  done
   SERVICES="$(docker compose -f "$THEWORKS_COMPOSE" --env-file .env.theworks.example config --services 2>/dev/null | sort)"
-  [ "$CLEANUP_ENV" = 1 ] && rm -f .env.theworks
+  [ -n "$CLEANUP_ENVS" ] && rm -f $CLEANUP_ENVS
   for svc in postgres theworks-cases-be theworks-cases-worker; do
     grep -qx "$svc" <<<"$SERVICES" || fail "$THEWORKS_COMPOSE does not define service '$svc'"
   done

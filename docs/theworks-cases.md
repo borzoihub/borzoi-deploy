@@ -40,13 +40,32 @@ GRANT ALL PRIVILEGES ON DATABASE theworks_cases TO voltini;
 
 ```bash
 git pull
-cp .env.theworks.example .env.theworks      # fill in secrets
+# Secrets are split per-service (least privilege): each container is handed only
+# the secrets it uses. Copy and fill in all three:
+cp .env.theworks.example        .env.theworks         # compose-CLI interpolation
+cp .env.theworks.be.example     .env.theworks.be      # theworks-cases-be only
+cp .env.theworks.worker.example .env.theworks.worker  # theworks-cases-worker only
 mkdir -p theworks-data/repos                 # the worker's REPOS_DIR
 # clone the Voltini CODE repos the worker opens PRs against into theworks-data/repos/
 docker compose -f docker-compose.theworks.yml --env-file .env.theworks up -d
 # run migrations on deploy (synchronize is false):
 docker compose -f docker-compose.theworks.yml exec theworks-cases-be npm run migration:up
 ```
+
+### Secret split (least privilege)
+
+Each container sees only the secrets it uses, so a compromise of one image does
+not leak the other's credentials:
+
+| File | Injected into | Holds |
+|---|---|---|
+| `.env.theworks` | nothing (compose-CLI `--env-file` interpolation only) | shared infra (registry/tags/ports), the shared Postgres credential, the worker's central live-data URL |
+| `.env.theworks.be` | `theworks-cases-be` only | GitHub mirror token, webhook HMAC secret + URL, AWS (SES/S3/Bedrock) keys |
+| `.env.theworks.worker` | `theworks-cases-worker` only | Claude subscription OAuth token, worker GitHub PAT, `agentWorker` token, behaviour knobs |
+
+The Postgres credential lives in `.env.theworks` and is interpolated into the
+`postgres` and `theworks-cases-be` `environment:` blocks — the worker, which
+keeps no local DB, never receives it.
 
 Images (`theworks-cases-be`, `theworks-cases-worker`) are built and published
 from their own repos to `${THEWORKS_REGISTRY}`; this bundle only orchestrates
