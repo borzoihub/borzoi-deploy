@@ -88,6 +88,10 @@ services:
       # Selects config/config.Production.json (casesConfig: voltini, GitHub
       # mirror → borzoihub/voltini-support, outbound status webhook → central).
       DEPLOYMENT_GROUP_NAME: Production
+      # The port theworks-cases-be listens on inside its container. Injected here
+      # so the SAME knob drives both the backend's listen port AND the worker's
+      # CENTRAL_API_BASE_URL below — one source of truth, no silent mismatch.
+      PORT: ${THEWORKS_CASES_BE_PORT:-3000}
       # Points at the shared Postgres and the SEPARATE theworks_cases database.
       DB_HOST: postgres
       DB_PORT: "5432"
@@ -123,8 +127,14 @@ services:
     volumes:
       # Host-side: clone the Voltini CODE repos into ./theworks-data/repos
       # (matches REPOS_DIR). All case state lives in theworks-cases-be — the
-      # worker keeps no local DB — so this mount is only the repo workspace.
-      - ./theworks-data:/data
+      # worker keeps no local DB — so this mount is ONLY the repo workspace.
+      # Mount the repos subdir directly, NOT the parent ./theworks-data: the
+      # parent also holds ./theworks-data/postgres (the Postgres cluster files),
+      # and handing that to the worker would let a compromised worker read the
+      # raw support-case database straight off disk — defeating the
+      # least-privilege split (no DB_PASSWORD, network isolation) this stack is
+      # built around. Keep the worker's filesystem view scoped to /data/repos.
+      - ./theworks-data/repos:/data/repos
     networks: [theworks]
 
 networks:
