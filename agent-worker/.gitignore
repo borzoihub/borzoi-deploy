@@ -1,9 +1,0 @@
-node_modules/
-.env
-.npmtoken
-*.log
-.DS_Store
-
-# Local runtime state: the SQLite resume journal (+ WAL/SHM side-cars) and the
-# pre-cloned work repos. Created at runtime; never belongs in version control.
-.data/

@@ -1,13 +1,14 @@
 .env
 .env.backup.*
+.env.theworks
+.env.theworks.be
+.env.theworks.worker
 installer-creds.json
 installer-creds.*.json
 sim-bundle.json
 sim-bundle.*.json
 data/
-agent-data/
-agent-worker/.npmtoken
-agent-worker/node_modules/
+theworks-data/
 certbot/conf/
 certbot/www/
 nginx/templates/*.conf

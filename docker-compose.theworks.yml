@@ -1,0 +1,142 @@
+name: voltini-theworks
+
+# ─────────────────────────────────────────────────────────────────────────────
+# theworks-cases stack for Voltini — the production cutover of the support-case
+# system (issue #45). This REPLACES the old in-repo resolver
+# (`docker-compose.agent.yml` + `agent-worker/`, both retired):
+#
+#   • theworks-cases-be     — system of record for Voltini support cases: storage,
+#                             status, title generation, the GitHub mirror
+#                             (borzoihub/voltini-support) and the /api/agent/*
+#                             contract. Runs INTERNAL-ONLY (no published ports);
+#                             reachable only on this compose network by central
+#                             and by the worker. `casesConfig: voltini`.
+#   • theworks-cases-worker — the backend-driven autonomous resolver that
+#                             replaces agent-worker/. Talks DIRECTLY to
+#                             theworks-cases-be's /api/agent/* (not through
+#                             central), runs PROJECT_HOOK=voltini, and reaches
+#                             the reporting Hub's live energy data through central
+#                             via LIVE_DATA_API_URL.
+#   • postgres              — the shared Postgres instance. Its POSTGRES_DB is the
+#                             primary (Voltini) database; scripts/theworks-initdb.sh
+#                             provisions the SEPARATE `theworks_cases` database on
+#                             the same server (one instance, two databases, two
+#                             migration histories — see the init script header).
+#
+# Deliberately NOT part of docker-compose.yml (the customer Hub stack): like the
+# retired agent compose, this is internal infrastructure that runs on a dedicated
+# dev/ops box, NEVER on a customer Raspberry Pi.
+#
+# Secrets are split per-service (least privilege): each container is handed only
+# the secrets it uses. See the env example headers for the full rationale.
+#   • .env.theworks         — compose-CLI interpolation only (shared infra + DB
+#                             credential); NOT injected wholesale into a container.
+#   • .env.theworks.be      — injected ONLY into theworks-cases-be.
+#   • .env.theworks.worker  — injected ONLY into theworks-cases-worker.
+#
+# Fresh-box runbook:
+#   1. git pull
+#   2. cp .env.theworks.example        .env.theworks         # then fill in secrets
+#      cp .env.theworks.be.example     .env.theworks.be      #   (each file holds
+#      cp .env.theworks.worker.example .env.theworks.worker  #    only its service's)
+#   3. mkdir -p theworks-data/repos && git clone the Voltini CODE repos into it
+#      (the worktrees the worker opens PRs against; matches REPOS_DIR).
+#   4. docker compose -f docker-compose.theworks.yml --env-file .env.theworks up -d
+#   5. docker compose -f docker-compose.theworks.yml exec theworks-cases-be \
+#        npm run migration:up          # migrations run on deploy (synchronize=false)
+#
+# Images are published from their own repos (theworks-cases-be, theworks-cases-
+# worker) to the ${THEWORKS_REGISTRY} registry — this bundle only orchestrates
+# them; it holds no application source (unlike the retired, vendored agent-worker).
+# ─────────────────────────────────────────────────────────────────────────────
+
+services:
+  postgres:
+    image: postgres:16
+    container_name: voltini-theworks-postgres
+    restart: unless-stopped
+    environment:
+      # The PRIMARY database on this shared instance (the Voltini database).
+      POSTGRES_DB: ${DB_NAME}
+      POSTGRES_USER: ${DB_USER}
+      POSTGRES_PASSWORD: ${DB_PASSWORD}
+      # Consumed by the init script to name the SECOND database.
+      THEWORKS_DB_NAME: ${THEWORKS_DB_NAME:-theworks_cases}
+    volumes:
+      - ./theworks-data/postgres:/var/lib/postgresql/data
+      # Runs once on first cluster init to CREATE DATABASE theworks_cases.
+      - ./scripts/theworks-initdb.sh:/docker-entrypoint-initdb.d/10-theworks-initdb.sh:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USER} -d ${DB_NAME}"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 30s
+    networks: [theworks]
+
+  theworks-cases-be:
+    image: ${THEWORKS_REGISTRY}/theworks-cases-be:${THEWORKS_CASES_BE_TAG:-latest}
+    container_name: voltini-theworks-cases-be
+    restart: unless-stopped
+    depends_on:
+      postgres: { condition: service_healthy }
+    # Least privilege: ONLY the backend's own secrets (GitHub mirror token, webhook
+    # secret, AWS keys). The worker's Claude/GitHub-PAT/agent tokens are never
+    # injected here. DB creds arrive via the interpolated `environment:` block below.
+    env_file: .env.theworks.be
+    environment:
+      # Selects config/config.Production.json (casesConfig: voltini, GitHub
+      # mirror → borzoihub/voltini-support, outbound status webhook → central).
+      DEPLOYMENT_GROUP_NAME: Production
+      # The port theworks-cases-be listens on inside its container. Injected here
+      # so the SAME knob drives both the backend's listen port AND the worker's
+      # CENTRAL_API_BASE_URL below — one source of truth, no silent mismatch.
+      PORT: ${THEWORKS_CASES_BE_PORT:-3000}
+      # Points at the shared Postgres and the SEPARATE theworks_cases database.
+      DB_HOST: postgres
+      DB_PORT: "5432"
+      DB_USER: ${DB_USER}
+      DB_PASSWORD: ${DB_PASSWORD}
+      DB_NAME: ${THEWORKS_DB_NAME:-theworks_cases}
+      DB_SSL: "false"
+    # INTERNAL ONLY — no `ports:`. Reachable on the theworks network by the
+    # worker (directly) and by central (over the ops network / host), never
+    # published publicly.
+    networks: [theworks]
+
+  theworks-cases-worker:
+    image: ${THEWORKS_REGISTRY}/theworks-cases-worker:${THEWORKS_CASES_WORKER_TAG:-latest}
+    container_name: voltini-theworks-cases-worker
+    restart: unless-stopped
+    depends_on:
+      theworks-cases-be: { condition: service_started }
+    # Least privilege: ONLY the worker's own secrets (Claude OAuth token, worker
+    # GitHub PAT, agentWorker token). The backend's GitHub mirror token, webhook
+    # secret, AWS keys and the Postgres credential are never injected here.
+    env_file: .env.theworks.worker
+    environment:
+      # The worker talks to theworks-cases-be DIRECTLY (not through central).
+      CENTRAL_API_BASE_URL: http://theworks-cases-be:${THEWORKS_CASES_BE_PORT:-3000}
+      # Voltini project hook: energy-domain prompts + the read-only
+      # live-installation-data tools.
+      PROJECT_HOOK: voltini
+      # Live energy data for triage/implement comes from Voltini central
+      # (the live-energy authority), never from the cases backend.
+      LIVE_DATA_API_URL: ${LIVE_DATA_API_URL}
+      REPOS_DIR: /data/repos
+    volumes:
+      # Host-side: clone the Voltini CODE repos into ./theworks-data/repos
+      # (matches REPOS_DIR). All case state lives in theworks-cases-be — the
+      # worker keeps no local DB — so this mount is ONLY the repo workspace.
+      # Mount the repos subdir directly, NOT the parent ./theworks-data: the
+      # parent also holds ./theworks-data/postgres (the Postgres cluster files),
+      # and handing that to the worker would let a compromised worker read the
+      # raw support-case database straight off disk — defeating the
+      # least-privilege split (no DB_PASSWORD, network isolation) this stack is
+      # built around. Keep the worker's filesystem view scoped to /data/repos.
+      - ./theworks-data/repos:/data/repos
+    networks: [theworks]
+
+networks:
+  theworks:
+    driver: bridge

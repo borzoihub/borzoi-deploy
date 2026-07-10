@@ -22,6 +22,10 @@ For each new customer Pi you deploy:
 
 8. **[Sim nodes](sim-nodes.md)** — install a simulation worker (`BORZOI_MODE=sim`), its OTA flow, and publishing the multi-arch image
 
+## Internal maintainer infrastructure
+
+9. **[theworks-cases stack](theworks-cases.md)** — the support-case system of record + autonomous resolver (dev/ops box only, never a customer Pi)
+
 ## Operations
 
 6. **[Updating](updating.md)** — roll out a new release, pin a version, roll back
@@ -40,6 +44,7 @@ For each new customer Pi you deploy:
 | Direct-internet TLS (rare) | [tls.md](tls.md) |
 | Updates and rollback | [updating.md](updating.md) |
 | Install a simulation worker node | [sim-nodes.md](sim-nodes.md) |
+| Support-case system + resolver (ops box) | [theworks-cases.md](theworks-cases.md) |
 | Publishing a multi-arch image | [sim-nodes.md#operator-publishing-a-multi-arch-image](sim-nodes.md#operator-publishing-a-multi-arch-image) |
 | ECR pull failures | [troubleshooting.md#ecr-pull-failures](troubleshooting.md#ecr-pull-failures) |
 | Scheduler not activating | [troubleshooting.md#backend-logs-waiting-for-required-settings](troubleshooting.md#backend-logs-waiting-for-required-settings) |
