@@ -67,6 +67,13 @@ The Postgres credential lives in `.env.theworks` and is interpolated into the
 `postgres` and `theworks-cases-be` `environment:` blocks — the worker, which
 keeps no local DB, never receives it.
 
+This split is machine-checked: `scripts/validate-theworks-compose.sh` renders
+`docker compose config` and asserts the worker block holds none of the backend's
+secrets (`DB_PASSWORD`, `GITHUB_TOKEN`, `NOTIFICATIONS_WEBHOOK_SECRET`, the AWS
+keys) and vice versa, and that the worker's only bind mount is scoped to
+`./theworks-data/repos` — never the parent `./theworks-data`, which also holds
+the raw Postgres cluster files. A regression that re-widens either fails the check.
+
 Images (`theworks-cases-be`, `theworks-cases-worker`) are built and published
 from their own repos to `${THEWORKS_REGISTRY}`; this bundle only orchestrates
 them and holds no application source.
