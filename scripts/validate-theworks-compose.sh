@@ -134,11 +134,14 @@ for key in $WORKER_ONLY_SECRETS; do
 done
 pass "secret split holds: worker has no backend secrets and backend has no worker secrets"
 
-# 8. Mount scope: the worker's bind mount must be the repo workspace ONLY
-#    (.../theworks-data/repos), never the parent ./theworks-data — whose
-#    ./theworks-data/postgres subdir holds the raw Postgres cluster (the
-#    support-case DB on disk). Mounting the parent would hand a compromised
-#    worker the database files, defeating the whole least-privilege split.
+# 8. Mount scope: every worker bind mount must be a SCOPED SUBDIRECTORY under
+#    theworks-data — e.g. .../theworks-data/repos (the repo workspace) or
+#    .../theworks-data/claude (the persisted Agent SDK session store that keeps
+#    ask_human-parked cases resumable across container recreation). It must NEVER
+#    be the parent ./theworks-data — whose ./theworks-data/postgres subdir holds
+#    the raw Postgres cluster (the support-case DB on disk) — and must never be
+#    that ./theworks-data/postgres subdir itself. Mounting either would hand a
+#    compromised worker the database files, defeating the least-privilege split.
 if [ -n "$RENDERED" ]; then
   # Rendered config normalises binds to long form: `source: /abs/.../theworks-data/repos`.
   SOURCES="$(grep -E '^\s*source:' <<<"$WORKER_BLOCK" | awk '{print $2}')"
@@ -146,15 +149,18 @@ else
   # Raw short form: `- ./theworks-data/repos:/data/repos` → take the host side.
   SOURCES="$(grep -E '^\s*-\s+[^ ]+:[^ ]+' <<<"$WORKER_BLOCK" | sed -E 's/^\s*-\s+//; s/:.*//')"
 fi
-[ -n "$SOURCES" ] || fail "worker has no bind mount source — expected .../theworks-data/repos"
+[ -n "$SOURCES" ] || fail "worker has no bind mount source — expected at least .../theworks-data/repos"
 while IFS= read -r src; do
   [ -z "$src" ] && continue
-  case "$src" in
-    */theworks-data/repos|*/theworks-data/repos/) ;;
-    *) fail "worker bind mount source '$src' is not scoped to .../theworks-data/repos (must not mount the parent ./theworks-data)" ;;
+  norm="${src%/}"   # tolerate a trailing slash on the host source path
+  case "$norm" in
+    */theworks-data)          fail "worker bind mount source '$src' is the parent ./theworks-data — mount a scoped subdirectory (e.g. .../theworks-data/repos), never the parent" ;;
+    */theworks-data/postgres) fail "worker bind mount source '$src' is the Postgres cluster dir — the raw support-case DB must stay out of the worker's reach" ;;
+    */theworks-data/*)        ;;  # a scoped subdir (repos, claude, …) — allowed
+    *)                        fail "worker bind mount source '$src' is not scoped under .../theworks-data (must be a subdirectory such as .../theworks-data/repos)" ;;
   esac
 done <<<"$SOURCES"
-pass "worker bind mount is scoped to .../theworks-data/repos (Postgres cluster files stay out of reach)"
+pass "worker bind mounts are scoped subdirectories of theworks-data (parent + Postgres cluster files stay out of reach)"
 
 # 9. Invariant: the customer Hub stack must NEVER host the resolver / cases backend.
 if [ -f "$HUB_COMPOSE" ]; then

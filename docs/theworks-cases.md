@@ -45,8 +45,9 @@ git pull
 cp .env.theworks.example        .env.theworks         # compose-CLI interpolation
 cp .env.theworks.be.example     .env.theworks.be      # theworks-cases-be only
 cp .env.theworks.worker.example .env.theworks.worker  # theworks-cases-worker only
-mkdir -p theworks-data/repos                 # the worker's REPOS_DIR
+mkdir -p theworks-data/repos theworks-data/claude   # REPOS_DIR + Agent SDK session store
 # clone the Voltini CODE repos the worker opens PRs against into theworks-data/repos/
+# (theworks-data/claude persists parked/ask_human sessions across container restarts)
 docker compose -f docker-compose.theworks.yml --env-file .env.theworks up -d
 # run migrations on deploy (synchronize is false):
 docker compose -f docker-compose.theworks.yml exec theworks-cases-be npm run migration:up
@@ -70,9 +71,11 @@ keeps no local DB, never receives it.
 This split is machine-checked: `scripts/validate-theworks-compose.sh` renders
 `docker compose config` and asserts the worker block holds none of the backend's
 secrets (`DB_PASSWORD`, `GITHUB_TOKEN`, `NOTIFICATIONS_WEBHOOK_SECRET`, the AWS
-keys) and vice versa, and that the worker's only bind mount is scoped to
-`./theworks-data/repos` — never the parent `./theworks-data`, which also holds
-the raw Postgres cluster files. A regression that re-widens either fails the check.
+keys) and vice versa, and that every worker bind mount is a scoped subdirectory
+of `./theworks-data` (the repo workspace `./theworks-data/repos` and the
+persisted Agent SDK session store `./theworks-data/claude`) — never the parent
+`./theworks-data` nor the `./theworks-data/postgres` cluster dir, which hold the
+raw Postgres cluster files. A regression that re-widens either fails the check.
 
 Images (`theworks-cases-be`, `theworks-cases-worker`) are built and published
 from their own repos to `${THEWORKS_REGISTRY}`; this bundle only orchestrates
