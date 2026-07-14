@@ -154,10 +154,13 @@ while IFS= read -r src; do
   [ -z "$src" ] && continue
   norm="${src%/}"   # tolerate a trailing slash on the host source path
   case "$norm" in
-    */theworks-data)          fail "worker bind mount source '$src' is the parent ./theworks-data — mount a scoped subdirectory (e.g. .../theworks-data/repos), never the parent" ;;
-    */theworks-data/postgres) fail "worker bind mount source '$src' is the Postgres cluster dir — the raw support-case DB must stay out of the worker's reach" ;;
-    */theworks-data/*)        ;;  # a scoped subdir (repos, claude, …) — allowed
-    *)                        fail "worker bind mount source '$src' is not scoped under .../theworks-data (must be a subdirectory such as .../theworks-data/repos)" ;;
+    # Strict allowlist: only the two intended worker workspaces. Anything else
+    # under theworks-data — the parent itself, the postgres cluster dir, or any
+    # of its subdirs (postgres/base, postgres/pg_wal, …) — is rejected, so the
+    # raw support-case DB on disk can never be bound into the worker.
+    */theworks-data/repos)  ;;  # the repo workspace — allowed
+    */theworks-data/claude) ;;  # the persisted Agent SDK session store — allowed
+    *)                      fail "worker bind mount source '$src' is not an allowed theworks-data workspace — mount only .../theworks-data/repos or .../theworks-data/claude (never the parent or the Postgres cluster)" ;;
   esac
 done <<<"$SOURCES"
 pass "worker bind mounts are scoped subdirectories of theworks-data (parent + Postgres cluster files stay out of reach)"

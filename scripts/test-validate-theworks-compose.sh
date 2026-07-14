@@ -80,4 +80,10 @@ expect "./theworks-data/postgres cluster mount" FAIL "./theworks-data/postgres"
 # 4. An out-of-tree mount (not under theworks-data) must FAIL.
 expect "unscoped host path mount" FAIL "/etc"
 
+# 5. A subdir WITHIN the Postgres cluster (where the raw DB bytes and WAL live)
+#    must FAIL — a denylist that only rejects the exact `postgres` dir would let
+#    these through, handing a compromised worker the on-disk support-case DB.
+expect "./theworks-data/postgres/base subdir mount"   FAIL "./theworks-data/postgres/base"
+expect "./theworks-data/postgres/pg_wal subdir mount" FAIL "./theworks-data/postgres/pg_wal"
+
 echo "All mount-scope regression checks passed."
