@@ -39,8 +39,10 @@ name: voltini-theworks
 #   2. cp .env.theworks.example        .env.theworks         # then fill in secrets
 #      cp .env.theworks.be.example     .env.theworks.be      #   (each file holds
 #      cp .env.theworks.worker.example .env.theworks.worker  #    only its service's)
-#   3. mkdir -p theworks-data/repos && git clone the Voltini CODE repos into it
-#      (the worktrees the worker opens PRs against; matches REPOS_DIR).
+#   3. mkdir -p theworks-data/repos theworks-data/claude && git clone the Voltini
+#      CODE repos into theworks-data/repos (the worktrees the worker opens PRs
+#      against; matches REPOS_DIR). theworks-data/claude persists the worker's
+#      Agent SDK session store so parked cases survive a container restart.
 #   4. docker compose -f docker-compose.theworks.yml --env-file .env.theworks up -d
 #   5. docker compose -f docker-compose.theworks.yml exec theworks-cases-be \
 #        npm run migration:up          # migrations run on deploy (synchronize=false)
@@ -124,6 +126,17 @@ services:
       # (the live-energy authority), never from the cases backend.
       LIVE_DATA_API_URL: ${LIVE_DATA_API_URL}
       REPOS_DIR: /data/repos
+      # Relocate the Agent SDK's config + session store off the container's
+      # ephemeral layer onto the mounted volume below. Each parked (ask_human)
+      # session's transcript lives here as projects/<cwd-hash>/<id>.jsonl; when a
+      # case waits days for a human reply the container is almost certainly
+      # recreated (restart, image bump, reboot) in that window, and without this
+      # the transcript is wiped — so the guidance-driven resume fails with
+      # "No conversation found with session ID" and the case is stranded at
+      # BLOCKED. Persisting it lets the resume find the parked conversation.
+      # (The worker also degrades gracefully if a transcript is still missing —
+      # see resumeBlockedTaskWithAnswer's fresh-session fallback.)
+      CLAUDE_CONFIG_DIR: /data/claude
     volumes:
       # Host-side: clone the Voltini CODE repos into ./theworks-data/repos
       # (matches REPOS_DIR). All case state lives in theworks-cases-be — the
@@ -133,8 +146,14 @@ services:
       # and handing that to the worker would let a compromised worker read the
       # raw support-case database straight off disk — defeating the
       # least-privilege split (no DB_PASSWORD, network isolation) this stack is
-      # built around. Keep the worker's filesystem view scoped to /data/repos.
+      # built around. Keep the worker's filesystem view scoped to /data.
       - ./theworks-data/repos:/data/repos
+      # Persist the Agent SDK config + parked-session transcripts (CLAUDE_CONFIG_DIR
+      # above) so a case parked on ask_human survives container recreation and can
+      # be resumed when the human finally replies. A dedicated subdir, NOT the
+      # parent ./theworks-data, for the same least-privilege reason as the repos
+      # mount above (keeps the Postgres cluster files out of the worker's view).
+      - ./theworks-data/claude:/data/claude
     networks: [theworks]
 
 networks:
