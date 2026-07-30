@@ -20,7 +20,7 @@ set -euo pipefail
 # DB-backup cron, and no Cloudflare tunnel. It only:
 #   - parses the pasted sim bundle (ECR creds + coordinator URL + worker token)
 #   - writes .env (mode 0600) pinned to docker-compose.sim.yml
-#   - installs + configures the amazon-ecr-credential-helper wrapper
+#   - logs docker in to the image registry (read-only token)
 #   - pulls the sim image and brings the sim + updater containers up
 # ============================================================================
 
@@ -153,10 +153,9 @@ else
   echo "" >&2
   echo "Shape expected (values will differ):" >&2
   echo "  {" >&2
-  echo "    \"ecr_region\":        \"eu-north-1\"," >&2
-  echo "    \"ecr_registry\":      \"<account>.dkr.ecr.<region>.amazonaws.com\"," >&2
-  echo "    \"access_key_id\":     \"AKIA...\"," >&2
-  echo "    \"secret_access_key\": \"...\"," >&2
+  echo "    \"registry\":         \"ghcr.io/borzoihub\"," >&2
+  echo "    \"ghcr_user\":        \"voltini-autobot\"," >&2
+  echo "    \"ghcr_token\":       \"ghp_...\"," >&2
   echo "    \"coordinator_url\":   \"https://api.voltini.energy\"," >&2
   echo "    \"worker_token\":      \"<long-lived WorkerService JWT>\"" >&2
   echo "  }" >&2
@@ -170,18 +169,16 @@ if [ -z "$BUNDLE_JSON" ]; then
   exit 1
 fi
 
-ECR_REGION=$(extract_json_field "ecr_region" "$BUNDLE_JSON")
-ECR_REGISTRY=$(extract_json_field "ecr_registry" "$BUNDLE_JSON")
-ECR_AWS_ACCESS_KEY_ID=$(extract_json_field "access_key_id" "$BUNDLE_JSON")
-ECR_AWS_SECRET_ACCESS_KEY=$(extract_json_field "secret_access_key" "$BUNDLE_JSON")
+REGISTRY=$(extract_json_field "registry" "$BUNDLE_JSON")
+GHCR_USER=$(extract_json_field "ghcr_user" "$BUNDLE_JSON")
+GHCR_TOKEN=$(extract_json_field "ghcr_token" "$BUNDLE_JSON")
 COORDINATOR_URL=$(extract_json_field "coordinator_url" "$BUNDLE_JSON")
 JOB_AUTH_TOKEN=$(extract_json_field "worker_token" "$BUNDLE_JSON")
 
 MISSING=""
-[ -z "$ECR_REGION" ]                && MISSING="$MISSING ecr_region"
-[ -z "$ECR_REGISTRY" ]              && MISSING="$MISSING ecr_registry"
-[ -z "$ECR_AWS_ACCESS_KEY_ID" ]     && MISSING="$MISSING access_key_id"
-[ -z "$ECR_AWS_SECRET_ACCESS_KEY" ] && MISSING="$MISSING secret_access_key"
+[ -z "$REGISTRY" ]                  && MISSING="$MISSING registry"
+[ -z "$GHCR_USER" ]                 && MISSING="$MISSING ghcr_user"
+[ -z "$GHCR_TOKEN" ]                && MISSING="$MISSING ghcr_token"
 [ -z "$COORDINATOR_URL" ]           && MISSING="$MISSING coordinator_url"
 [ -z "$JOB_AUTH_TOKEN" ]            && MISSING="$MISSING worker_token"
 if [ -n "$MISSING" ]; then
@@ -189,7 +186,7 @@ if [ -n "$MISSING" ]; then
   exit 1
 fi
 
-info "Parsed sim bundle for region $ECR_REGION, registry $ECR_REGISTRY."
+info "Parsed sim bundle for registry $REGISTRY, coordinator $COORDINATOR_URL."
 info "Coordinator: $COORDINATOR_URL"
 
 # Node identity + parallelism. Default the node id to the hostname (the same
@@ -218,27 +215,14 @@ else
   done
 fi
 
-# ---------- optional ECR credential validation -----------------------------
+# ---------- registry credential check ---------------------------------------
 
-if [ "$HAS_AWS_CLI" = "1" ]; then
-  echo "" >&2
-  info "Validating ECR credentials..."
-  while :; do
-    if AWS_ACCESS_KEY_ID="$ECR_AWS_ACCESS_KEY_ID" \
-       AWS_SECRET_ACCESS_KEY="$ECR_AWS_SECRET_ACCESS_KEY" \
-       AWS_REGION="$ECR_REGION" \
-       aws sts get-caller-identity >/dev/null 2>&1; then
-      info "ECR credentials OK."
-      break
-    fi
-    err "ECR credential validation failed."
-    retry=$(ask "Re-enter ECR credentials? (yes/no)" "yes")
-    if [ "$retry" != "yes" ]; then exit 1; fi
-    ECR_AWS_ACCESS_KEY_ID=$(ask "ECR Access Key ID" "$ECR_AWS_ACCESS_KEY_ID")
-    ECR_AWS_SECRET_ACCESS_KEY=$(ask_secret "ECR Secret Access Key")
-  done
+info "Verifying registry credentials..."
+if printf '%s' "$GHCR_TOKEN" | docker login "${REGISTRY%%/*}" -u "$GHCR_USER" --password-stdin >/dev/null 2>&1; then
+  info "Registry login OK (${REGISTRY%%/*})."
 else
-  info "aws-cli not installed — skipping credential validation."
+  err "docker login to ${REGISTRY%%/*} failed — check ghcr_user / ghcr_token in the bundle."
+  exit 1
 fi
 
 # ---------- write .env ------------------------------------------------------
@@ -252,14 +236,15 @@ cat > .env <<EOF
 COMPOSE_FILE=$COMPOSE_FILE_SIM
 
 # Image source (multi-arch borzoi-backend manifest; the node pulls its arch).
-ECR_REGISTRY=$ECR_REGISTRY
+REGISTRY=$REGISTRY
+GHCR_USER=$GHCR_USER
+GHCR_TOKEN=$GHCR_TOKEN
 BACKEND_TAG=latest
 
 # OTA updater sidecar — absolute host paths (compose interpolates these; the
 # updater mounts the project at its real host path so relative bind mounts and
 # the data/upgrade channel resolve identically inside and out).
 INSTALL_DIR=$(pwd)
-HOST_AWS_DIR=$HOME/.aws
 
 # Coordinator (job queue) — outbound only.
 COORDINATOR_URL=$COORDINATOR_URL
@@ -275,104 +260,9 @@ info ".env written (mode 600)."
 
 mkdir -p data/upgrade
 
-# ---------- ECR credential helper ------------------------------------------
-# Identical mechanism to the Hub setup.sh: ECR pull credentials live in a
-# borzoi-specific AWS profile, invoked through a wrapper that pins
-# AWS_PROFILE=borzoi-ecr so they never collide with the host's [default].
-
-info "Writing ECR credentials to ~/.aws/credentials [borzoi-ecr] profile..."
-mkdir -p "$HOME/.aws"
-umask 077
-touch "$HOME/.aws/credentials" "$HOME/.aws/config"
-chmod 600 "$HOME/.aws/credentials" "$HOME/.aws/config"
-
-# Remove any previous borzoi-ecr block, then append fresh values (awk
-# in-place rewrite leaves other profiles intact). The header differs by file:
-# credentials uses `[borzoi-ecr]`, config uses `[profile borzoi-ecr]` — match
-# BOTH (optional `profile ` prefix), or the config block is never removed and a
-# duplicate section is appended every run → aws "Unable to parse config file".
-for f in "$HOME/.aws/credentials" "$HOME/.aws/config"; do
-  awk '
-    BEGIN { skip = 0 }
-    /^\[(profile[[:space:]]+)?borzoi-ecr\][[:space:]]*$/ { skip = 1; next }
-    /^\[/ && skip == 1 { skip = 0 }
-    skip == 0 { print }
-  ' "$f" > "$f.tmp" && mv "$f.tmp" "$f"
-done
-
-cat >> "$HOME/.aws/credentials" <<EOF
-[borzoi-ecr]
-aws_access_key_id = $ECR_AWS_ACCESS_KEY_ID
-aws_secret_access_key = $ECR_AWS_SECRET_ACCESS_KEY
-EOF
-
-cat >> "$HOME/.aws/config" <<EOF
-[profile borzoi-ecr]
-region = $ECR_REGION
-EOF
-
-if ! command -v docker-credential-ecr-login >/dev/null 2>&1; then
-  info "Installing amazon-ecr-credential-helper..."
-  if command -v apt-get >/dev/null 2>&1; then
-    sudo apt-get update
-    sudo apt-get install -y amazon-ecr-credential-helper
-  elif command -v dnf >/dev/null 2>&1; then
-    # Amazon Linux 2023 / Fedora / RHEL 8+.
-    sudo dnf install -y amazon-ecr-credential-helper
-  elif command -v yum >/dev/null 2>&1; then
-    # Amazon Linux 2 / older RHEL/CentOS.
-    sudo yum install -y amazon-ecr-credential-helper
-  else
-    err "amazon-ecr-credential-helper not installed and no supported package"
-    err "manager (apt-get / dnf / yum) found."
-    err "Install manually: https://github.com/awslabs/amazon-ecr-credential-helper"
-    exit 1
-  fi
-fi
-
-info "Installing borzoi-ecr-login wrapper script..."
-# Install to /usr/local/bin AND symlink into /usr/bin so docker finds it
-# regardless of PATH. Explicit mode 0755 (umask 077 above would otherwise make
-# `sudo tee` create it 0600 → docker "not in PATH").
-sudo tee /usr/local/bin/docker-credential-borzoi-ecr-login >/dev/null <<'WRAPPER'
-#!/bin/sh
-# Pins AWS_PROFILE so the ECR credential helper uses the borzoi-specific
-# profile in ~/.aws/credentials, not whatever [default] happens to be.
-AWS_PROFILE=borzoi-ecr exec docker-credential-ecr-login "$@"
-WRAPPER
-sudo chmod 0755 /usr/local/bin/docker-credential-borzoi-ecr-login
-sudo ln -sf /usr/local/bin/docker-credential-borzoi-ecr-login \
-            /usr/bin/docker-credential-borzoi-ecr-login
-
-if ! command -v docker-credential-borzoi-ecr-login >/dev/null 2>&1; then
-  err "Wrapper not on PATH after install. PATH=$PATH"
-  exit 1
-fi
-if ! command -v docker-credential-ecr-login >/dev/null 2>&1; then
-  err "amazon-ecr-credential-helper is not installed correctly (docker-credential-ecr-login missing from PATH)."
-  err "Reinstall it with your package manager and re-run, e.g.:"
-  err "  apt-get install --reinstall amazon-ecr-credential-helper   (Debian/Ubuntu)"
-  err "  dnf reinstall amazon-ecr-credential-helper                 (Amazon Linux 2023 / RHEL)"
-  err "  yum reinstall amazon-ecr-credential-helper                 (Amazon Linux 2)"
-  exit 1
-fi
-
-info "Configuring docker to use the borzoi ECR credential helper..."
-mkdir -p "$HOME/.docker"
-if [ -f "$HOME/.docker/config.json" ] && command -v jq >/dev/null 2>&1; then
-  tmp=$(mktemp)
-  jq --arg reg "$ECR_REGISTRY" '.credHelpers[$reg] = "borzoi-ecr-login"' \
-     "$HOME/.docker/config.json" > "$tmp" && mv "$tmp" "$HOME/.docker/config.json"
-else
-  cat > "$HOME/.docker/config.json" <<EOF
-{
-  "credHelpers": {
-    "$ECR_REGISTRY": "borzoi-ecr-login"
-  }
-}
-EOF
-fi
-chmod 600 "$HOME/.docker/config.json"
+# ---------- registry auth ---------------------------------------------------
+# The `docker login` in the credential-validation step above already wrote
+# ~/.docker/config.json. No credential helper, no ~/.aws profile.
 
 # ---------- pull + up ------------------------------------------------------
 # Explicit -f here (the updater's own bare calls rely on COMPOSE_FILE in .env).

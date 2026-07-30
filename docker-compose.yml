@@ -23,7 +23,7 @@ services:
     networks: [borzoi]
 
   backend:
-    image: ${ECR_REGISTRY}/borzoi-backend:${BACKEND_TAG:-latest}
+    image: ${REGISTRY}/borzoi-backend:${BACKEND_TAG:-latest}
     container_name: borzoi-backend
     restart: unless-stopped
     depends_on:
@@ -81,11 +81,10 @@ services:
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
       - ${INSTALL_DIR}:${INSTALL_DIR}
-      - ${HOST_AWS_DIR}:/root/.aws:ro
     networks: [borzoi]
 
   frontend:
-    image: ${ECR_REGISTRY}/borzoi-frontend:${FRONTEND_TAG:-latest}
+    image: ${REGISTRY}/borzoi-frontend:${FRONTEND_TAG:-latest}
     container_name: borzoi-frontend
     restart: "no"
     volumes:

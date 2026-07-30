@@ -9,10 +9,10 @@ set -euo pipefail
 # the operator puts in front). Setup optionally installs + enrolls
 # cloudflared with a tunnel token.
 #
-# - Prompts for environment-specific values (ECR creds, Cloudflare token)
+# - Prompts for environment-specific values (registry token, Cloudflare token)
 # - Generates strong secrets for DB, JWT, and the bootstrap admin password
 # - Writes a .env file (mode 0600)
-# - Installs amazon-ecr-credential-helper and configures docker to use it
+# - Logs docker in to the image registry (read-only token)
 # - Optionally installs cloudflared and enrolls a Zero Trust tunnel
 # - Pulls images and brings the stack up
 # - Prints the admin login ONCE at the end — not stored anywhere else
@@ -168,7 +168,7 @@ UNIT
 fi
 
 # ---------- DNS resilience --------------------------------------------------
-# dockerd uses the host's /etc/resolv.conf for ECR pulls. When the
+# dockerd uses the host's /etc/resolv.conf for registry pulls. When the
 # customer's router DNS is slow or flaky, pulls fail mid-stream with
 # "i/o timeout" on the router IP. Override DNS on all wifi+ethernet
 # connection profiles to point at Cloudflare + Google public resolvers
@@ -240,60 +240,34 @@ echo "" >&2
 BORZOI_DOMAIN="localhost"
 BORZOI_BASE_URL="http://localhost:8080"
 
-# ---- ECR pull credentials (paste the JSON the operator generated) ----
+# ---- Registry pull credential ----
+# Images live in GitHub Container Registry. The Hub needs a read-only token to
+# pull them and nothing else, so there is no credentials packet to paste any
+# more — just the token.
 echo "" >&2
-echo "Paste the installer credentials JSON (produced by scripts/aws-setup.sh" >&2
-echo "on the operator machine). End the paste with Ctrl-D on a blank line." >&2
+echo "Registry pull token (GitHub classic PAT, scope: read:packages ONLY)." >&2
+echo "Issued from the machine account by the operator; the same token serves" >&2
+echo "every Hub and can be revoked centrally." >&2
 echo "" >&2
-echo "Shape expected (values will differ):" >&2
-echo "  {" >&2
-echo "    \"ecr_region\":        \"eu-north-1\"," >&2
-echo "    \"ecr_registry\":      \"<account>.dkr.ecr.<region>.amazonaws.com\"," >&2
-echo "    \"access_key_id\":     \"AKIA...\"," >&2
-echo "    \"secret_access_key\": \"...\"" >&2
-echo "  }" >&2
-echo "" >&2
-echo "(Paste now, then Ctrl-D):" >&2
 
-CREDS_JSON=$(cat)
+REGISTRY="${REGISTRY:-ghcr.io/borzoihub}"
+GHCR_USER=$(ask "Registry username (machine account)" "voltini-autobot")
 
-if [ -z "$CREDS_JSON" ]; then
-  err "Empty input. Paste the JSON from aws-setup.sh and try again."
+GHCR_TOKEN=""
+while [ -z "$GHCR_TOKEN" ]; do
+  printf "Registry token (input hidden): " >&2
+  stty -echo 2>/dev/null; read -r GHCR_TOKEN; stty echo 2>/dev/null; echo "" >&2
+  [ -z "$GHCR_TOKEN" ] && err "Token cannot be empty."
+done
+
+# Verify now: a bad token here is far cheaper to diagnose than at the first pull.
+info "Verifying registry credentials..."
+if printf '%s' "$GHCR_TOKEN" | docker login "${REGISTRY%%/*}" -u "$GHCR_USER" --password-stdin >/dev/null 2>&1; then
+  info "Registry login OK (${REGISTRY%%/*}). Stored in ~/.docker/config.json."
+else
+  err "docker login to ${REGISTRY%%/*} failed — check the username and token."
   exit 1
 fi
-
-# Minimal JSON field extractor — avoids a hard dependency on jq.
-# Handles the simple flat structure aws-setup.sh emits (no nesting, no arrays).
-extract_json_field() {
-  local field="$1" input="$2"
-  # Match   "field": "value"   with flexible whitespace; unescapes basic \" only.
-  printf '%s' "$input" | awk -v f="$field" '
-    BEGIN { FS="\"" }
-    {
-      for (i = 1; i < NF; i++) {
-        if ($i == f) {
-          for (j = i+1; j <= NF; j++) if ($j ~ /[^ :[:space:]]/) { print $j; exit }
-        }
-      }
-    }'
-}
-
-ECR_REGION=$(extract_json_field "ecr_region" "$CREDS_JSON")
-ECR_REGISTRY=$(extract_json_field "ecr_registry" "$CREDS_JSON")
-ECR_AWS_ACCESS_KEY_ID=$(extract_json_field "access_key_id" "$CREDS_JSON")
-ECR_AWS_SECRET_ACCESS_KEY=$(extract_json_field "secret_access_key" "$CREDS_JSON")
-
-MISSING=""
-[ -z "$ECR_REGION" ]              && MISSING="$MISSING ecr_region"
-[ -z "$ECR_REGISTRY" ]            && MISSING="$MISSING ecr_registry"
-[ -z "$ECR_AWS_ACCESS_KEY_ID" ]   && MISSING="$MISSING access_key_id"
-[ -z "$ECR_AWS_SECRET_ACCESS_KEY" ] && MISSING="$MISSING secret_access_key"
-if [ -n "$MISSING" ]; then
-  err "Pasted JSON is missing:$MISSING"
-  exit 1
-fi
-
-info "Parsed ECR credentials for region $ECR_REGION, registry $ECR_REGISTRY."
 
 # ---- Application AWS credentials (S3 + SES) ----
 # The backend has code paths for S3 (file uploads) and SES (account
@@ -364,22 +338,6 @@ fi
 
 if [ "$HAS_AWS_CLI" = "1" ]; then
   echo "" >&2
-  info "Validating ECR credentials..."
-  while :; do
-    if AWS_ACCESS_KEY_ID="$ECR_AWS_ACCESS_KEY_ID" \
-       AWS_SECRET_ACCESS_KEY="$ECR_AWS_SECRET_ACCESS_KEY" \
-       AWS_REGION="$ECR_REGION" \
-       aws sts get-caller-identity >/dev/null 2>&1; then
-      info "ECR credentials OK."
-      break
-    fi
-    err "ECR credential validation failed."
-    retry=$(ask "Re-enter ECR credentials? (yes/no)" "yes")
-    if [ "$retry" != "yes" ]; then exit 1; fi
-    ECR_AWS_ACCESS_KEY_ID=$(ask "ECR Access Key ID" "$ECR_AWS_ACCESS_KEY_ID")
-    ECR_AWS_SECRET_ACCESS_KEY=$(ask_secret "ECR Secret Access Key")
-  done
-
   # App AWS creds are placeholders — skip validation. Re-enable if/when
   # S3 or SES features become active in the product.
   if false; then
@@ -418,7 +376,9 @@ cat > .env <<EOF
 # initial cluster init. Rotating requires manual ALTER USER + this file.
 
 # Image source
-ECR_REGISTRY=$ECR_REGISTRY
+REGISTRY=$REGISTRY
+GHCR_USER=$GHCR_USER
+GHCR_TOKEN=$GHCR_TOKEN
 BACKEND_TAG=latest
 FRONTEND_TAG=latest
 
@@ -426,7 +386,6 @@ FRONTEND_TAG=latest
 # absolute host paths (compose interpolates these; the updater mounts the
 # project at its real host path so relative bind mounts resolve correctly).
 INSTALL_DIR=$(pwd)
-HOST_AWS_DIR=$HOME/.aws
 
 # Public URL / domain
 BORZOI_DOMAIN=$BORZOI_DOMAIN
@@ -462,109 +421,15 @@ info ".env written (mode 600)."
 
 mkdir -p data/postgres data/backups data/upgrade nginx/templates
 
-# ---------- ECR credential helper -----------------------------------------
-# Two-profile setup: the ECR pull credentials live in a borzoi-specific
-# AWS profile (so they don't collide with anything else on the host); the
-# helper is invoked through a wrapper that pins AWS_PROFILE=borzoi-ecr.
-# The application's AWS credentials are never touched by docker — they
-# only live in .env and reach the backend via env_file.
-
-info "Writing ECR credentials to ~/.aws/credentials [borzoi-ecr] profile..."
-mkdir -p "$HOME/.aws"
-umask 077
-touch "$HOME/.aws/credentials" "$HOME/.aws/config"
-chmod 600 "$HOME/.aws/credentials" "$HOME/.aws/config"
-
-# Remove any previous [borzoi-ecr] block, then append fresh values.
-# Use awk for an in-place rewrite that leaves other profiles intact.
-for f in "$HOME/.aws/credentials" "$HOME/.aws/config"; do
-  awk '
-    BEGIN { skip = 0 }
-    /^\[borzoi-ecr\][[:space:]]*$/ { skip = 1; next }
-    /^\[/ && skip == 1 { skip = 0 }
-    skip == 0 { print }
-  ' "$f" > "$f.tmp" && mv "$f.tmp" "$f"
-done
-
-cat >> "$HOME/.aws/credentials" <<EOF
-[borzoi-ecr]
-aws_access_key_id = $ECR_AWS_ACCESS_KEY_ID
-aws_secret_access_key = $ECR_AWS_SECRET_ACCESS_KEY
-EOF
-
-cat >> "$HOME/.aws/config" <<EOF
-[profile borzoi-ecr]
-region = $ECR_REGION
-EOF
-
-if ! command -v docker-credential-ecr-login >/dev/null 2>&1; then
-  info "Installing amazon-ecr-credential-helper..."
-  if command -v apt-get >/dev/null 2>&1; then
-    sudo apt-get update
-    sudo apt-get install -y amazon-ecr-credential-helper
-  else
-    err "amazon-ecr-credential-helper not installed and apt-get unavailable."
-    err "Install manually: https://github.com/awslabs/amazon-ecr-credential-helper"
-    exit 1
-  fi
-fi
-
-info "Installing borzoi-ecr-login wrapper script..."
-# Install to /usr/local/bin (FHS convention for admin scripts) AND
-# symlink into /usr/bin so docker can always find it regardless of the
-# shell's PATH (non-login SSH sessions, systemd-spawned contexts, etc.
-# sometimes miss /usr/local/bin).
-#
-# We use an explicit mode 0755 (not chmod +x) because the umask 077 set
-# earlier in this script for .env propagates through `sudo tee`, which
-# would otherwise create the file as 0600 — making it unreadable/
-# unexecutable by the docker user and producing a misleading "not in
-# PATH" error from docker.
-sudo tee /usr/local/bin/docker-credential-borzoi-ecr-login >/dev/null <<'WRAPPER'
-#!/bin/sh
-# Pins AWS_PROFILE so the ECR credential helper uses the borzoi-specific
-# profile in ~/.aws/credentials, not whatever [default] happens to be.
-AWS_PROFILE=borzoi-ecr exec docker-credential-ecr-login "$@"
-WRAPPER
-sudo chmod 0755 /usr/local/bin/docker-credential-borzoi-ecr-login
-sudo ln -sf /usr/local/bin/docker-credential-borzoi-ecr-login \
-            /usr/bin/docker-credential-borzoi-ecr-login
-
-# Verify both the wrapper and the underlying helper resolve before we
-# try `docker compose pull` — otherwise the pull failure is opaque.
-if ! command -v docker-credential-borzoi-ecr-login >/dev/null 2>&1; then
-  err "Wrapper not on PATH after install. PATH=$PATH"
-  err "Expected at /usr/local/bin/docker-credential-borzoi-ecr-login and /usr/bin/..."
-  ls -la /usr/local/bin/docker-credential-borzoi-ecr-login \
-         /usr/bin/docker-credential-borzoi-ecr-login 2>&1 >&2 || true
-  exit 1
-fi
-if ! command -v docker-credential-ecr-login >/dev/null 2>&1; then
-  err "amazon-ecr-credential-helper is not installed correctly (docker-credential-ecr-login missing from PATH)."
-  err "Try: sudo apt-get install --reinstall amazon-ecr-credential-helper"
-  exit 1
-fi
-
-info "Configuring docker to use the borzoi ECR credential helper..."
-mkdir -p "$HOME/.docker"
-if [ -f "$HOME/.docker/config.json" ] && command -v jq >/dev/null 2>&1; then
-  tmp=$(mktemp)
-  jq --arg reg "$ECR_REGISTRY" '.credHelpers[$reg] = "borzoi-ecr-login"' \
-     "$HOME/.docker/config.json" > "$tmp" && mv "$tmp" "$HOME/.docker/config.json"
-else
-  cat > "$HOME/.docker/config.json" <<EOF
-{
-  "credHelpers": {
-    "$ECR_REGISTRY": "borzoi-ecr-login"
-  }
-}
-EOF
-fi
-chmod 600 "$HOME/.docker/config.json"
+# ---------- registry auth ---------------------------------------------------
+# Nothing to do here. The `docker login` during the credential prompt above
+# wrote ~/.docker/config.json, which persists across reboots. There is no
+# credential helper, no ~/.aws profile and no wrapper script any more — GHCR
+# takes a plain bearer token.
 
 # ---------- pull + up ------------------------------------------------------
 
-info "Pulling images from ECR..."
+info "Pulling images..."
 docker compose pull
 
 info "Bringing stack up..."

@@ -12,7 +12,7 @@ set -euo pipefail
 #
 # It runs the SAME pull -> retag -> up -d sequence the updater sidecar runs, so
 # the result is identical to clicking "Update" in the portal — including the
-# no-op case: if ECR's `latest` is the same image the node already runs, the
+# no-op case: if the registry's `latest` is the same image the node already runs, the
 # container is NOT recreated and the script reports that and exits 0.
 #
 # Usage:
@@ -44,7 +44,7 @@ if [ ! -f "$COMPOSE_FILE_SIM" ]; then
   exit 1
 fi
 
-# .env carries ECR_REGISTRY (+ the pinned COMPOSE_FILE / project). Explicit -f
+# .env carries REGISTRY (+ the pinned COMPOSE_FILE / project). Explicit -f
 # below means we don't rely on COMPOSE_FILE, but the sourced values are still
 # needed for the registry host.
 set -a
@@ -52,23 +52,29 @@ set -a
 source .env
 set +a
 
-if [ -z "${ECR_REGISTRY:-}" ]; then
-  err "ECR_REGISTRY not set in .env."
+if [ -z "${REGISTRY:-}" ]; then
+  err "REGISTRY not set in .env."
   exit 1
 fi
 
 dc() { docker compose -f "$COMPOSE_FILE_SIM" "$@"; }
 
-# ---------- ECR credential check --------------------------------------------
-# install-sim.sh configures the docker credential helper, so a plain pull
-# authenticates automatically. Verify it before pulling so a creds problem
-# surfaces clearly instead of as a generic pull failure.
+# ---------- registry credential ----------------------------------------------
 
-info "Verifying ECR credentials..."
-if echo "$ECR_REGISTRY" | docker-credential-borzoi-ecr-login get >/dev/null 2>&1; then
-  info "ECR credentials OK."
+# GHCR needs an explicit `docker login`. Unlike the old ECR credential helper
+# there is no token exchange — GHCR_TOKEN is a read:packages PAT read from
+# .env. Logging in each run is cheap and idempotent, and keeps a host that was
+# restored from backup (or whose ~/.docker was cleared) working without a
+# manual step.
+info "Authenticating to ${REGISTRY%%/*}..."
+if [ -z "${GHCR_TOKEN:-}" ]; then
+  err "GHCR_TOKEN is not set in .env — cannot pull images. See docs/updating.md."
+  exit 1
+fi
+if printf '%s' "$GHCR_TOKEN" | docker login "${REGISTRY%%/*}" -u "${GHCR_USER:-voltini-autobot}" --password-stdin >/dev/null 2>&1; then
+  info "Registry credentials OK."
 else
-  err "ECR credential helper failed. Check ~/.aws/credentials [borzoi-ecr] profile."
+  err "docker login to ${REGISTRY%%/*} failed. Check GHCR_USER/GHCR_TOKEN in .env."
   exit 1
 fi
 
@@ -82,21 +88,21 @@ if [ -n "$RUNNING_CID" ]; then
   RUNNING_IMG="$(docker inspect "$RUNNING_CID" --format '{{.Image}}' 2>/dev/null || true)"
 fi
 
-info "Pulling sim image from ECR..."
+info "Pulling sim image..."
 # Only the `sim` service — the `updater` sidecar is built locally
 # (pull_policy: build), so a bare `docker compose pull` would fail on it.
 dc pull sim
 
-LATEST_IMG="$(docker image inspect "$ECR_REGISTRY/borzoi-backend:latest" --format '{{.Id}}' 2>/dev/null || true)"
+LATEST_IMG="$(docker image inspect "$REGISTRY/borzoi-backend:latest" --format '{{.Id}}' 2>/dev/null || true)"
 
 # Read the version from inside the pulled image and re-tag locally so that
 # `docker ps` shows the real version instead of ":latest" (mirrors update.sh /
 # updater.sh). Best-effort.
-BACKEND_VER="$(docker run --rm --entrypoint node "$ECR_REGISTRY/borzoi-backend:latest" \
+BACKEND_VER="$(docker run --rm --entrypoint node "$REGISTRY/borzoi-backend:latest" \
   -p "require('./package.json').version" 2>/dev/null || true)"
 if [ -n "$BACKEND_VER" ]; then
-  docker tag "$ECR_REGISTRY/borzoi-backend:latest" \
-    "$ECR_REGISTRY/borzoi-backend:$BACKEND_VER" 2>/dev/null || true
+  docker tag "$REGISTRY/borzoi-backend:latest" \
+    "$REGISTRY/borzoi-backend:$BACKEND_VER" 2>/dev/null || true
   export BACKEND_TAG="$BACKEND_VER"
   info "Latest published version: $BACKEND_VER"
 else

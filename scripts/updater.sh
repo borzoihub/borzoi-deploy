@@ -2,11 +2,10 @@
 # ─────────────────────────────────────────────────────────────────────
 # Borzoi OTA updater — sidecar loop
 #
-# Runs inside the `updater` container (Docker socket + aws-cli + compose
-# plugin). It is the execution half of the portal-triggered OTA upgrade:
+# Runs inside the `updater` container (Docker socket + git + compose plugin). It is the execution half of the portal-triggered OTA upgrade:
 #
 #   borzoi-backend  → writes data/upgrade/request.json
-#   THIS LOOP       → backup → ECR login → pull → up -d → prune
+#   THIS LOOP       → backup → git sync → registry login → pull → up -d → prune
 #                     writing progress to data/upgrade/status.json
 #   borzoi-backend  → reads status.json back (survives its own restart)
 #
@@ -45,7 +44,7 @@ OTA_BACKUP="${OTA_BACKUP:-1}"
 
 mkdir -p "$UPGRADE_DIR"
 
-# .env carries ECR_REGISTRY (+ DB_USER / DB_NAME for the backup script).
+# .env carries REGISTRY + GHCR_TOKEN (+ DB_USER / DB_NAME for the backup script).
 set -a
 [ -f "$INSTALL_DIR/.env" ] && . "$INSTALL_DIR/.env"
 set +a
@@ -82,66 +81,32 @@ write_status() {
   mv "$STATUS.tmp" "$STATUS"
 }
 
-ecr_login() {
+# Authenticate to the image registry. Runs on every upgrade because this
+# container's filesystem is ephemeral — a login written here does not survive a
+# recreate, unlike the host's ~/.docker/config.json.
+#
+# GHCR_TOKEN is a read:packages PAT from .env. When the central token broker
+# lands this becomes a fetch of a short-lived token; nothing else in this file
+# changes.
+registry_login() {
   LOGIN_ERR=""
-  if [ -z "${ECR_REGISTRY:-}" ]; then
-    LOGIN_ERR="ECR_REGISTRY not set in .env"
+  if [ -z "${REGISTRY:-}" ]; then
+    LOGIN_ERR="REGISTRY not set in .env"
     echo "updater: $LOGIN_ERR" >&2
     return 1
   fi
-  # ECR registry host is <account>.dkr.ecr.<region>.amazonaws.com
-  local region pw out
-  region="$(printf '%s' "$ECR_REGISTRY" | cut -d. -f4)"
-
-  # Capture the real reason (creds not found, TLS/cert, IAM, …) so it lands
-  # in status.json + these logs instead of a generic "login failed".
-  if ! pw="$(aws ecr get-login-password --profile borzoi-ecr --region "$region" 2>&1)"; then
-    LOGIN_ERR="aws get-login-password: $pw"
+  if [ -z "${GHCR_TOKEN:-}" ]; then
+    LOGIN_ERR="GHCR_TOKEN not set in .env"
     echo "updater: $LOGIN_ERR" >&2
     return 1
   fi
-  if ! out="$(printf '%s' "$pw" | docker login --username AWS --password-stdin "$ECR_REGISTRY" 2>&1)"; then
-    LOGIN_ERR="docker login: $out"
+  # Registry host only — REGISTRY is "ghcr.io/borzoihub".
+  local host out
+  host="${REGISTRY%%/*}"
+  if ! out="$(printf '%s' "$GHCR_TOKEN" | docker login "$host" -u "${GHCR_USER:-voltini-autobot}" --password-stdin 2>&1)"; then
+    LOGIN_ERR="docker login $host: $out"
     echo "updater: $LOGIN_ERR" >&2
     return 1
-  fi
-}
-
-# Sync THIS bundle from git before deploying.
-#
-# Why: images arrive from the registry, but docker-compose.yml, the nginx
-# templates and any mounted config.json do NOT — they are plain files in the
-# /opt/borzoi checkout. Without this, a Hub runs whatever bundle it was
-# installed with, forever, and every compose change needs a visit to every Pi.
-#
-# Three details that are easy to get wrong:
-#
-#   * Run git as the CHECKOUT'S OWNER, not root. The container is root while
-#     the host repo belongs to the install user, so plain `git pull` would trip
-#     git's dubious-ownership guard — and if waved through with safe.directory,
-#     it would leave root-owned objects in .git that later break a host-side
-#     `./update.sh` run by that user. `setpriv --reuid` avoids both.
-#   * HOME is /root here and is not readable by that uid, so point git at /tmp
-#     for its config lookup.
-#   * NEVER fail the upgrade on a failed pull. A hand-edited tracked file on one
-#     Pi makes --ff-only refuse; that must not block a backend upgrade. Warn and
-#     continue with the on-disk files.
-#
-# Self-update caveat: bash has already read this script into memory, so a change
-# to updater.sh itself takes effect on the NEXT run. Compose/config changes
-# apply to this one.
-git_sync() {
-  [ -d "$INSTALL_DIR/.git" ] || { echo "updater: $INSTALL_DIR is not a git checkout — skipping sync."; return 0; }
-
-  local uid gid
-  uid="$(stat -c '%u' "$INSTALL_DIR")"
-  gid="$(stat -c '%g' "$INSTALL_DIR")"
-
-  if setpriv --reuid="$uid" --regid="$gid" --clear-groups \
-       env HOME=/tmp git -C "$INSTALL_DIR" pull --ff-only; then
-    echo "updater: bundle synced from git."
-  else
-    echo "updater: git pull --ff-only failed (diverged or dirty tree?) — continuing with on-disk files." >&2
   fi
 }
 
@@ -158,7 +123,7 @@ run_upgrade() {
     fi
   fi
 
-  # 2. Sync the bundle, then authenticate to ECR and pull the runtime images. We
+  # 2. Sync the bundle, then authenticate to the registry and pull the runtime images. We
   #    pull the configured services explicitly (NOT a bare `pull`) so compose
   #    never tries to pull the locally-built `updater` image.
   #
@@ -168,8 +133,8 @@ run_upgrade() {
   #    common release plus new Swedish copy in voltini-app for no user benefit.
   write_status running pull "" ""
   git_sync
-  if ! ecr_login; then
-    write_status failed pull "" "ECR login failed: ${LOGIN_ERR:-unknown}"
+  if ! registry_login; then
+    write_status failed pull "" "Registry login failed: ${LOGIN_ERR:-unknown}"
     return
   fi
   # Always resolve `latest` fresh. This function runs in the updater's
@@ -186,11 +151,11 @@ run_upgrade() {
   # Resolve the pulled backend version (for reporting + a real ps tag).
   local target
   target="$(docker run --rm --entrypoint node \
-    "$ECR_REGISTRY/borzoi-backend:latest" \
+    "$REGISTRY/borzoi-backend:latest" \
     -p "require('./package.json').version" 2>/dev/null || true)"
   if [ -n "$target" ]; then
-    docker tag "$ECR_REGISTRY/borzoi-backend:latest" \
-      "$ECR_REGISTRY/borzoi-backend:$target" 2>/dev/null || true
+    docker tag "$REGISTRY/borzoi-backend:latest" \
+      "$REGISTRY/borzoi-backend:$target" 2>/dev/null || true
     export BACKEND_TAG="$target"
   fi
 

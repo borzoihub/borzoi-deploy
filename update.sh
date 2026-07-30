@@ -53,15 +53,22 @@ else
   info "Not a git checkout — skipping bundle sync."
 fi
 
-# ---------- ECR credential check ---------------------------------------------
+# ---------- registry credential ----------------------------------------------
 
-# The docker credential helper (docker-credential-borzoi-ecr-login) handles
-# ECR auth automatically on every pull. Verify it works before pulling.
-info "Verifying ECR credentials..."
-if echo "$ECR_REGISTRY" | docker-credential-borzoi-ecr-login get >/dev/null 2>&1; then
-  info "ECR credentials OK."
+# GHCR needs an explicit `docker login`. Unlike the old ECR credential helper
+# there is no token exchange — GHCR_TOKEN is a read:packages PAT read from
+# .env. Logging in each run is cheap and idempotent, and keeps a host that was
+# restored from backup (or whose ~/.docker was cleared) working without a
+# manual step.
+info "Authenticating to ${REGISTRY%%/*}..."
+if [ -z "${GHCR_TOKEN:-}" ]; then
+  err "GHCR_TOKEN is not set in .env — cannot pull images. See docs/updating.md."
+  exit 1
+fi
+if printf '%s' "$GHCR_TOKEN" | docker login "${REGISTRY%%/*}" -u "${GHCR_USER:-voltini-autobot}" --password-stdin >/dev/null 2>&1; then
+  info "Registry credentials OK."
 else
-  err "ECR credential helper failed. Check ~/.aws/credentials [borzoi-ecr] profile."
+  err "docker login to ${REGISTRY%%/*} failed. Check GHCR_USER/GHCR_TOKEN in .env."
   exit 1
 fi
 
@@ -75,10 +82,10 @@ docker compose pull postgres backend frontend nginx
 
 # Read the version from inside the pulled image and re-tag locally so that
 # "docker ps" shows the real version instead of ":latest".
-BACKEND_VER=$(docker run --rm --entrypoint node "$ECR_REGISTRY/borzoi-backend:latest" -p "require('./package.json').version" 2>/dev/null)
+BACKEND_VER=$(docker run --rm --entrypoint node "$REGISTRY/borzoi-backend:latest" -p "require('./package.json').version" 2>/dev/null)
 
 if [ -n "$BACKEND_VER" ]; then
-  docker tag "$ECR_REGISTRY/borzoi-backend:latest" "$ECR_REGISTRY/borzoi-backend:$BACKEND_VER"
+  docker tag "$REGISTRY/borzoi-backend:latest" "$REGISTRY/borzoi-backend:$BACKEND_VER"
   export BACKEND_TAG="$BACKEND_VER"
   info "Backend version: $BACKEND_VER"
 else

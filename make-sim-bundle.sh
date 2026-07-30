@@ -5,7 +5,7 @@ set -euo pipefail
 # Build a sim-bundle.json for sim-node installs — run ONCE on the operator
 # machine, then reuse the output for every node.
 #
-# It REUSES your existing shared ECR installer credentials (the same ones your
+# It REUSES your existing shared registry credentials (the same ones your
 # Hubs use) and MINTS the WorkerService token for you. There is NO new AWS
 # credential, no aws-setup.sh, no new IAM key, and no separate manual mint step.
 #
@@ -17,10 +17,10 @@ set -euo pipefail
 #                        [--out <sim-bundle.json>]
 #
 # Inputs:
-#   ECR creds   → installer-creds.json (default; fields ecr_region /
-#                 ecr_registry / access_key_id / secret_access_key). If it's not
+#   Registry    → installer-creds.json (default; fields registry /
+#                 ghcr_user / ghcr_token). If it's not
 #                 here, copy it from your password manager or any deployed Hub
-#                 (~/.aws/credentials [borzoi-ecr] + ECR_REGISTRY in
+#                 (the REGISTRY / GHCR_* lines in
 #                 /opt/borzoi/.env) — it's the same shared credential.
 #   coordinator → committed prod value https://api.voltini.energy
 #                 (override with --coordinator for a non-prod fleet).
@@ -64,16 +64,16 @@ done
 command -v jq >/dev/null 2>&1 || { echo "ERROR: jq is required (brew install jq)." >&2; exit 1; }
 
 if [ ! -r "$CREDS" ]; then
-  echo "ERROR: ECR creds file not found: $CREDS" >&2
+  echo "ERROR: registry creds file not found: $CREDS" >&2
   echo "  This is the SAME shared installer credential your Hubs use — reuse it," >&2
   echo "  don't create a new one. Point --creds at your installer-creds.json, or" >&2
-  echo "  copy it from a deployed Hub (~/.aws/credentials [borzoi-ecr] + the" >&2
-  echo "  ECR_REGISTRY line in /opt/borzoi/.env)." >&2
+  echo "  copy it from a deployed Hub (the REGISTRY / GHCR_USER / GHCR_TOKEN" >&2
+  echo "  lines in /opt/borzoi/.env)." >&2
   exit 1
 fi
 
-# Validate the creds file has the four ECR fields.
-for f in ecr_region ecr_registry access_key_id secret_access_key; do
+# Validate the creds file has the registry fields.
+for f in registry ghcr_user ghcr_token; do
   v=$(jq -r --arg f "$f" '.[$f] // empty' "$CREDS")
   [ -n "$v" ] || { echo "ERROR: $CREDS missing field: $f" >&2; exit 1; }
 done
@@ -128,9 +128,9 @@ fi
 # --- assemble ----------------------------------------------------------------
 umask 077
 jq --arg url "$COORDINATOR_URL" --arg tok "$TOKEN" \
-   '{ecr_region, ecr_registry, access_key_id, secret_access_key} + {coordinator_url: $url, worker_token: $tok}' \
+   '{registry, ghcr_user, ghcr_token} + {coordinator_url: $url, worker_token: $tok}' \
    "$CREDS" > "$OUT"
 chmod 600 "$OUT"
 
-echo "Wrote $OUT (mode 600) — reused ECR creds from $CREDS, coordinator $COORDINATOR_URL."
+echo "Wrote $OUT (mode 600) — reused registry creds from $CREDS, coordinator $COORDINATOR_URL."
 echo "Install a node with:  ./install-sim.sh $OUT"
