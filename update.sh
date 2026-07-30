@@ -34,6 +34,25 @@ else
   exit 1
 fi
 
+# ---------- sync this bundle from git ----------------------------------------
+
+# Images come from the registry; docker-compose.yml, the nginx templates and any
+# mounted config.json do not — they are files in this checkout. Pull them here so
+# a manual update applies infrastructure changes too, not just new images.
+# Deliberately non-fatal: --ff-only refuses on a diverged or hand-edited tree,
+# and that must not block a backend upgrade. Kept in step with git_sync() in
+# scripts/updater.sh (the OTA path).
+if [ -d .git ]; then
+  info "Syncing bundle from git..."
+  if git pull --ff-only; then
+    info "Bundle synced."
+  else
+    err "git pull --ff-only failed (diverged or dirty tree?) — continuing with on-disk files."
+  fi
+else
+  info "Not a git checkout — skipping bundle sync."
+fi
+
 # ---------- ECR credential check ---------------------------------------------
 
 # The docker credential helper (docker-credential-borzoi-ecr-login) handles

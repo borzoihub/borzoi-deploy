@@ -107,6 +107,44 @@ ecr_login() {
   fi
 }
 
+# Sync THIS bundle from git before deploying.
+#
+# Why: images arrive from the registry, but docker-compose.yml, the nginx
+# templates and any mounted config.json do NOT — they are plain files in the
+# /opt/borzoi checkout. Without this, a Hub runs whatever bundle it was
+# installed with, forever, and every compose change needs a visit to every Pi.
+#
+# Three details that are easy to get wrong:
+#
+#   * Run git as the CHECKOUT'S OWNER, not root. The container is root while
+#     the host repo belongs to the install user, so plain `git pull` would trip
+#     git's dubious-ownership guard — and if waved through with safe.directory,
+#     it would leave root-owned objects in .git that later break a host-side
+#     `./update.sh` run by that user. `setpriv --reuid` avoids both.
+#   * HOME is /root here and is not readable by that uid, so point git at /tmp
+#     for its config lookup.
+#   * NEVER fail the upgrade on a failed pull. A hand-edited tracked file on one
+#     Pi makes --ff-only refuse; that must not block a backend upgrade. Warn and
+#     continue with the on-disk files.
+#
+# Self-update caveat: bash has already read this script into memory, so a change
+# to updater.sh itself takes effect on the NEXT run. Compose/config changes
+# apply to this one.
+git_sync() {
+  [ -d "$INSTALL_DIR/.git" ] || { echo "updater: $INSTALL_DIR is not a git checkout — skipping sync."; return 0; }
+
+  local uid gid
+  uid="$(stat -c '%u' "$INSTALL_DIR")"
+  gid="$(stat -c '%g' "$INSTALL_DIR")"
+
+  if setpriv --reuid="$uid" --regid="$gid" --clear-groups \
+       env HOME=/tmp git -C "$INSTALL_DIR" pull --ff-only; then
+    echo "updater: bundle synced from git."
+  else
+    echo "updater: git pull --ff-only failed (diverged or dirty tree?) — continuing with on-disk files." >&2
+  fi
+}
+
 run_upgrade() {
   STARTED_AT="$(now_iso)"
 
@@ -120,10 +158,16 @@ run_upgrade() {
     fi
   fi
 
-  # 2. Authenticate to ECR and pull the runtime images. We pull the configured
-  #    services explicitly (NOT a bare `pull`) so compose never tries to pull
-  #    the locally-built `updater` image.
+  # 2. Sync the bundle, then authenticate to ECR and pull the runtime images. We
+  #    pull the configured services explicitly (NOT a bare `pull`) so compose
+  #    never tries to pull the locally-built `updater` image.
+  #
+  #    The git sync reports under the existing `pull` step rather than a new one:
+  #    `IHubUpgradeStep` in borzoi-common is a fixed
+  #    `backup|pull|restart|verify` union, and adding a value would need a
+  #    common release plus new Swedish copy in voltini-app for no user benefit.
   write_status running pull "" ""
+  git_sync
   if ! ecr_login; then
     write_status failed pull "" "ECR login failed: ${LOGIN_ERR:-unknown}"
     return

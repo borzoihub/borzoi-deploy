@@ -9,12 +9,19 @@
 # socket is mounted) so the loop can drive the stack. Built locally on the Pi
 # from this bundle; never pushed to a registry. Entrypoint/command are set in
 # docker-compose.yml so scripts/updater.sh can be edited without a rebuild.
+#
+# `git` is here so the loop can sync THIS bundle before deploying — images
+# arrive from the registry, but docker-compose.yml / nginx templates / any
+# mounted config.json only reach the Pi via git. Keep this image as thin as
+# possible: OTA deliberately never recreates the updater, so anything added
+# here costs a manual visit to every Hub, whereas scripts/updater.sh is
+# bind-mounted and free to change.
 FROM debian:bookworm-slim
 
 RUN set -eux; \
     apt-get update; \
     apt-get install -y --no-install-recommends \
-        ca-certificates curl unzip gnupg bash; \
+        ca-certificates curl unzip gnupg bash git util-linux; \
     # Docker CLI + Compose plugin from Docker's official apt repo.
     install -m 0755 -d /etc/apt/keyrings; \
     curl -fsSL https://download.docker.com/linux/debian/gpg \
@@ -31,5 +38,7 @@ https://download.docker.com/linux/debian bookworm stable" \
     unzip -q /tmp/awscliv2.zip -d /tmp; \
     /tmp/aws/install; \
     rm -rf /tmp/aws /tmp/awscliv2.zip /var/lib/apt/lists/*; \
-    # Fail the build early if any tool is broken.
-    aws --version; docker --version; docker compose version
+    # Fail the build early if any tool is broken. `setpriv` (util-linux) lets
+    # the loop run git as the host checkout's owner instead of root — see
+    # git_sync() in scripts/updater.sh.
+    aws --version; docker --version; docker compose version; git --version; setpriv --version
