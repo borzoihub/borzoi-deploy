@@ -33,6 +33,27 @@ services:
       # Shared OTA-upgrade channel with the updater sidecar: the backend
       # writes request.json and reads status.json + the capability marker.
       - ./data/upgrade:/data/upgrade
+    # Readiness probe — `GET /api/health/ready` (plain express, unauthenticated,
+    # registered before the tsoa routes so it answers even if those fail).
+    # Probed with `node -e` because the slim image ships no curl or wget; node
+    # 20 has global fetch.
+    #
+    # NOTE what this does and does not do: compose does NOT restart an unhealthy
+    # container (`restart: unless-stopped` reacts to EXIT, not to health). This
+    # gives `docker compose ps` an honest answer, and gives the updater sidecar
+    # — which already polls every 10 s with the Docker socket mounted —
+    # something to act on if we later want auto-recovery.
+    #
+    # start_period is long because a cold Pi boot runs migrations, the
+    # bootstrap admin and the detector backfills before serving.
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - "node -e \"fetch('http://localhost:3100/api/health/ready').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))\""
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 180s
     networks: [borzoi]
 
   # OTA updater sidecar — executes portal-triggered upgrades. Built locally
