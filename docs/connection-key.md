@@ -1,10 +1,9 @@
 # Hub connection key
 
-The single credential a Hub holds for Voltini central. It replaces the
-long-lived cloud credentials that would otherwise sit on an SD card in a
-customer's house: instead of holding a registry token and an AWS key forever,
-the Pi holds one key for *central* and exchanges it, on demand, for short-lived
-access scoped to this Hub alone.
+The single credential a Hub holds for Voltini central. It removes the AWS key
+that would otherwise sit on an SD card in a customer's house: instead of holding
+a cloud key forever, the Pi holds one key for *central* and exchanges it, on
+demand, for short-lived access scoped to this Hub alone.
 
 Central-side design and API:
 [`voltini.energy-backend/docs/HUB_CREDENTIAL_BROKER.md`](../../voltini.energy-backend/docs/HUB_CREDENTIAL_BROKER.md).
@@ -13,8 +12,21 @@ Central-side design and API:
 
 | Use | How |
 |---|---|
-| Pull container images | `scripts/broker.sh` fetches a ~1 h registry token; `registry_login()` in `update.sh` / `scripts/updater.sh` uses it |
 | Upload nightly backups | the `db-backup` service sets `AWS_CONTAINER_CREDENTIALS_FULL_URI`, and the AWS CLI fetches credentials itself |
+
+That is the whole list.
+
+**It is not used to pull images.** It was meant to be — the original design
+brokered a short-lived per-Hub registry token, and `scripts/broker.sh` existed
+to fetch it. That was removed on 2026-07-31: GHCR accepts a classic PAT or an
+Actions `GITHUB_TOKEN` and nothing else, so no credential central can mint will
+ever work there. Measured, not assumed — a correctly configured GitHub App
+minted tokens fine and got `403` on every manifest read, while a classic PAT got
+`200`. Confirmed by GitHub staff as a platform limitation:
+<https://github.com/orgs/community/discussions/171423>.
+
+Image pulls use `GHCR_TOKEN` from `.env`, shared across the fleet, and will keep
+doing so.
 
 ## Deploy/infra layer only — never the application
 
@@ -107,23 +119,33 @@ bundle carries `JWT_SECRET`, the DB password, the admin password **and
 is a deliberate decision, but it means a leaked bundle hands over this Hub's
 central credential along with its database. **Rotate the key after any restore.**
 
-## Transitional: the static registry token
+## The static registry token — permanent, not transitional
 
-`GHCR_TOKEN` in `.env` is a shared `read:packages` PAT with no expiry and no
-per-Hub revocation. `scripts/broker.sh` prefers a brokered token and falls back
-to it, logging loudly when it does — a silent fallback is how a broken broker
-goes unnoticed for months.
+`GHCR_TOKEN` in `.env` is a shared `read:packages` classic PAT with no expiry
+and no per-Hub revocation. It is what pulls images, on every Hub, always.
 
-Retire it per Hub once the portal shows a recent *Senast använd* for that
-installation: that field is how you know the Hub really picked up its key, as
-opposed to one merely having been created for it. Then blank `GHCR_TOKEN`.
+**Do not blank it** (revised 2026-07-31). The plan was to retire it per Hub once
+the portal showed a recent *Senast använd*. That is not achievable: GHCR accepts
+a classic PAT or an Actions `GITHUB_TOKEN` and nothing else, so there is no
+brokered credential to move to and never will be without a change at GitHub.
+
+Accepted consequences, stated plainly so nobody re-opens this expecting a win:
+
+- The same credential is on every Hub. A stolen Pi exposes it fleet-wide.
+- Rotating it means updating every Hub's `.env`.
+- Blocking one Hub's connection key does **not** stop it pulling images.
+
+*Senast använd* still tells you the Hub reached central and its key works — that
+part is real, and it is what gates cloud backups. It says nothing about image
+pulls.
 
 ## Troubleshooting
 
 | Symptom | Cause |
 |---|---|
-| `broker: … returned HTTP 401` | key wrong, or blocked in the portal. Issue a new one. |
-| `broker: … returned HTTP 503` | central is up but the operator has not finished provisioning that half. Falls back to `GHCR_TOKEN`. |
+| `docker login … failed` during an update | `GHCR_TOKEN` is unset, mistyped, or was regenerated on `voltini-autobot`. Test it by hand: `printf '%s' "$GHCR_TOKEN" \| docker login ghcr.io -u "$GHCR_USER" --password-stdin`. |
+| Cloud backup returns HTTP 401 | key wrong, or blocked in the portal. Issue a new one. |
+| Cloud backup returns HTTP 503 | central is up and has accepted the key — it just has no backup bucket/role provisioned yet. `set-hub-secret.sh` treats this as proof the key is good. |
 | Backups fail `AccessDenied` | `VOLTINI_INSTALLATION_ID` does not match the key's installation. |
 | Backups fail `RequestTimeTooSkewed` | the Pi's clock is off by more than 15 min. A Pi has no RTC; after a power cut it can boot weeks in the past until NTP syncs. Self-heals. |
 | Everything HTTPS fails after a long outage | same clock problem — a stale clock rejects certificates issued during the outage as "not yet valid". Self-heals once NTP syncs; the updater retries every 10 s. |

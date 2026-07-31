@@ -13,6 +13,47 @@ cd "$(dirname "$0")"
 err() { echo "ERROR: $*" >&2; }
 info() { echo "$*"; }
 
+# ---------- options ----------------------------------------------------------
+#
+#   --wait [--timeout N]   Wait for a NEW :latest to be published before pulling.
+#
+# For the "I just pushed, don't hand me the old image" case. CI takes a few
+# minutes (test + build on two architectures + promote), so an update run
+# started right after a push would otherwise pull the previous image and look
+# like the change did nothing.
+#
+# It watches the REGISTRY, not GitHub Actions, for two reasons:
+#
+#   1. borzoi-backend is private, so reading the Actions API needs a token with
+#      `actions:read` on every Pi. The Hub's registry token is `read:packages`
+#      only, deliberately — putting a broader GitHub token on hardware in a
+#      customer's house to answer "is a build running" is a bad trade.
+#   2. A finished run is not the thing you care about. `:latest` only moves in
+#      the `promote` job, which runs only if the tests passed. So a moved
+#      :latest means "tested and published", which is strictly more than
+#      "the workflow ended".
+#
+# Deliberately OPT-IN: with no flag this script behaves exactly as before. It
+# cannot tell "the build has not finished" from "there is nothing to wait for",
+# so a default wait would hang every routine update. Use it when you know you
+# just pushed.
+WAIT_FOR_NEW=0
+WAIT_TIMEOUT=900   # 15 min — a full two-arch CI run with room to spare.
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --wait|-w)   WAIT_FOR_NEW=1; shift ;;
+    --timeout)   WAIT_TIMEOUT="${2:?--timeout needs a value in seconds}"; shift 2 ;;
+    -h|--help)
+      echo "Usage: $0 [--wait] [--timeout SECONDS]"
+      echo "  --wait      wait for a newly published :latest before pulling"
+      echo "  --timeout   how long to wait, in seconds (default ${WAIT_TIMEOUT})"
+      exit 0
+      ;;
+    *) err "Unknown option: $1 (try --help)"; exit 1 ;;
+  esac
+done
+
 if [ ! -f .env ]; then
   err ".env not found — run setup.sh first for initial installation."
   exit 1
@@ -22,11 +63,6 @@ fi
 set -a
 source .env
 set +a
-
-# Credential-broker client — supplies `registry_credential`, which prefers a
-# short-lived token brokered through central and falls back to the static
-# GHCR_TOKEN. Kept in step with scripts/updater.sh (the OTA path).
-source ./scripts/broker.sh
 
 # ---------- pre-update backup ------------------------------------------------
 
@@ -60,26 +96,75 @@ fi
 
 # ---------- registry credential ----------------------------------------------
 
-# GHCR needs an explicit `docker login`. The password comes from
-# `registry_credential`: a short-lived token brokered through central when this
-# Hub has its central secret, else the static read:packages PAT. Logging in each
-# run is cheap and idempotent, and keeps a host that was restored from backup
-# (or whose ~/.docker was cleared) working without a manual step — which matters
-# more now, since a brokered token expires in about an hour.
+# GHCR needs an explicit `docker login`, with the shared read:packages PAT from
+# .env. Logging in each run is cheap and idempotent, and keeps a host that was
+# restored from backup (or whose ~/.docker was cleared) working without a manual
+# step.
+#
+# This used to broker a short-lived per-Hub token through central. That was
+# removed on 2026-07-31: GHCR does not accept any credential central can mint —
+# not GitHub App installation tokens, not registry bearers — so the broker could
+# only ever hand back this same PAT. See docs/connection-key.md.
 info "Authenticating to ${REGISTRY%%/*}..."
-# Not `$(registry_credential)` — that subshell would discard BROKER_ERR and
-# REGISTRY_CRED_SOURCE and leave the failure message blank. See scripts/broker.sh.
-if ! registry_credential; then
-  err "${BROKER_ERR}. See docs/updating.md."
+if [ -z "${GHCR_TOKEN:-}" ]; then
+  err "GHCR_TOKEN is not set in .env — cannot pull images. See docs/updating.md."
   exit 1
 fi
-if printf '%s' "$REGISTRY_CREDENTIAL" | docker login "${REGISTRY%%/*}" -u "${GHCR_USER:-voltini-autobot}" --password-stdin >/dev/null 2>&1; then
-  info "Registry credentials OK (${REGISTRY_CRED_SOURCE} credential)."
+if printf '%s' "$GHCR_TOKEN" | docker login "${REGISTRY%%/*}" -u "${GHCR_USER:-voltini-autobot}" --password-stdin >/dev/null 2>&1; then
+  info "Registry credentials OK."
 else
-  err "docker login to ${REGISTRY%%/*} failed using the ${REGISTRY_CRED_SOURCE} credential."
+  err "docker login to ${REGISTRY%%/*} failed. Is GHCR_TOKEN valid?"
   exit 1
 fi
-unset REGISTRY_CREDENTIAL
+
+# ---------- optionally wait for a new image ----------------------------------
+
+# Fingerprint of what :latest points at right now. Hashing the manifest instead
+# of parsing a digest out of it keeps this dependency-free — no jq, no python —
+# and the manifest is byte-stable for a given image, so the hash changes if and
+# only if the image does.
+#
+# `sha256sum` (coreutils) is the one guaranteed on a Raspberry Pi; `shasum`
+# (perl) is what macOS has. Try both so this behaves the same on a Pi and on a
+# developer's laptop — the Pi is the target that matters, and it was the one the
+# first cut would have failed on.
+_sha256() {
+  if command -v sha256sum >/dev/null 2>&1; then sha256sum
+  else shasum -a 256
+  fi
+}
+latest_fingerprint() {
+  docker manifest inspect "$REGISTRY/borzoi-backend:latest" 2>/dev/null | _sha256 | cut -d' ' -f1
+}
+
+if [ "$WAIT_FOR_NEW" = "1" ]; then
+  BEFORE="$(latest_fingerprint)"
+  if [ -z "$BEFORE" ]; then
+    err "Could not read the current :latest manifest — skipping the wait and pulling as usual."
+  else
+    info "Waiting for a new :latest (up to $((WAIT_TIMEOUT / 60)) min). Ctrl-C to pull whatever is there now."
+    WAITED=0
+    while [ "$WAITED" -lt "$WAIT_TIMEOUT" ]; do
+      sleep 15
+      WAITED=$((WAITED + 15))
+      NOW="$(latest_fingerprint)"
+      # An empty read is a transient registry blip, not "unchanged" — ignore it
+      # rather than treating it as an answer.
+      if [ -n "$NOW" ] && [ "$NOW" != "$BEFORE" ]; then
+        info "New image published after ${WAITED}s — continuing."
+        break
+      fi
+      # Progress every minute, so a long wait does not look like a hang.
+      [ $((WAITED % 60)) -eq 0 ] && info "  ...still waiting (${WAITED}s)"
+    done
+    if [ "$WAITED" -ge "$WAIT_TIMEOUT" ]; then
+      err ":latest did not change within $((WAIT_TIMEOUT / 60)) min."
+      err "Either the build is still running, it failed, or it was already published before this run started."
+      err "Check the Actions tab, then re-run without --wait to pull what is there."
+      exit 1
+    fi
+  fi
+fi
 
 # ---------- pull + resolve versions ------------------------------------------
 

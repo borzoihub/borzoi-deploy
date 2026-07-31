@@ -78,7 +78,9 @@ one merely having been created for it.
 Note the nightly backup bundle contains that same `.env`, so **rotate a Hub's
 key after restoring one onto new hardware**.
 
-The shared `GHCR_TOKEN` is the one credential a single stolen Pi still exposes
-fleet-wide, since every Pi holds the same one. Once a Hub brokers its registry
-token through its connection key, blocking the key covers this too — which is
-the argument for retiring `GHCR_TOKEN` per Hub as each adopts a key.
+The shared `GHCR_TOKEN` is the one credential a single stolen Pi exposes
+fleet-wide, since every Pi holds the same one. There is no way to narrow that:
+GHCR accepts only a classic PAT or an Actions `GITHUB_TOKEN`, so a per-Hub
+registry credential is not possible and blocking a Hub's connection key does not
+stop it pulling images. Rotating means updating every Hub's `.env`. See
+[connection-key.md](connection-key.md).

@@ -49,16 +49,21 @@ esac
 
 # shellcheck disable=SC1090
 set -a; source "$ENV_FILE"; set +a
-source "${SCRIPT_DIR}/broker.sh"
 
 BROKER_URL="${VOLTINI_BROKER_URL:-https://api.voltini.energy/api/hub/credentials}"
 
 # ── verify — does the credential actually work? ─────────────────────────────
+#
+# Probes `s3-backup`, the only endpoint the broker still has (`registry-pull`
+# was removed 2026-07-31 — GHCR accepts nothing central can mint). A 200 here
+# mints a real STS session the Hub then discards, which is wasteful but
+# harmless: the credentials are short-lived and confined to this installation's
+# own prefix. What we are actually testing is the Authorization header.
 verify_secret() {
   local secret="$1" response http
   response="$(curl -sS --max-time 15 -w $'\n%{http_code}' \
       -H "Authorization: Bearer ${secret}" \
-      "${BROKER_URL%/}/registry-pull" 2>&1)" || {
+      "${BROKER_URL%/}/s3-backup" 2>&1)" || {
     echo "unreachable: ${response}"
     return 2
   }
@@ -66,16 +71,17 @@ verify_secret() {
   case "$http" in
     200) echo "ok"; return 0 ;;
     401) echo "rejected by central — the secret is wrong, or has been revoked"; return 1 ;;
-    503) # Central accepted the credential; it just has no GitHub App wired yet.
-         # That still proves the secret is valid, which is what we are checking.
-         echo "ok (central accepted the secret; registry broker not configured yet)"; return 0 ;;
+    503) # Central accepted the credential; it just has no backup bucket/role
+         # configured yet. That still proves the secret is valid, which is what
+         # we are checking.
+         echo "ok (central accepted the secret; cloud backup not provisioned yet)"; return 0 ;;
     *)   echo "unexpected HTTP ${http}"; return 1 ;;
   esac
 }
 
 if [ "$MODE" = "check" ]; then
   if [ -z "${VOLTINI_HUB_SECRET:-}" ]; then
-    info "No central secret installed — this Hub uses the static GHCR_TOKEN and has no cloud backup."
+    info "No central secret installed — this Hub has no cloud backup (image pulls are unaffected; they always use GHCR_TOKEN)."
     exit 0
   fi
   info "Secret installed: ${VOLTINI_HUB_SECRET:0:12}… (installation ${VOLTINI_INSTALLATION_ID:-unset})"
@@ -168,7 +174,6 @@ if docker compose ps --services 2>/dev/null | grep -q '^db-backup$'; then
   docker compose up -d db-backup >/dev/null 2>&1 \
     || err "could not restart db-backup — do it manually."
 fi
-info "The updater re-reads .env on its next loop; no restart needed."
 
 cat <<EOF
 
@@ -177,8 +182,10 @@ Done. Next:
   - Confirm the portal shows a recent "last used" for installation
     ${SECRET_INSTALLATION_ID} — that is how you know this Hub has really adopted
     the credential.
-  - Once it has, blank GHCR_TOKEN in .env to retire the shared static PAT for
-    this Hub.
   - To enable cloud backups, set BACKUP_S3_BUCKET and add 'cloud-backup' to
     COMPOSE_PROFILES, then: docker compose up -d db-backup
+
+Note: this secret has nothing to do with pulling images. That uses GHCR_TOKEN
+and always will — GHCR accepts no credential central can mint. Do NOT blank
+GHCR_TOKEN; it is the only thing that pulls. See docs/connection-key.md.
 EOF

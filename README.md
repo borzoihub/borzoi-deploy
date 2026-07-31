@@ -5,11 +5,12 @@
 A self-contained deploy bundle for running the full Borzoi stack
 (backend + frontend + TimescaleDB + nginx) on a single host — typically
 a Raspberry Pi 4 or 5. Images are pulled from GitHub Container Registry
-(`ghcr.io/borzoihub`). No source code, no developer credentials and **no
-long-lived cloud credential** live on the device — the Hub holds one
-connection key for Voltini central and exchanges it per use for short-lived
-registry and backup access. A single `setup.sh` run generates secrets, writes
-a `.env`, and brings the stack up.
+(`ghcr.io/borzoihub`). No developer credentials and **no long-lived cloud
+credential** live on the device — the Hub holds one connection key for Voltini
+central and exchanges it per use for short-lived backup access. Image pulls use
+a shared `read:packages` registry token; that one is static, because GHCR
+accepts nothing else (see [connection key](docs/connection-key.md)). A single
+`setup.sh` run generates secrets, writes a `.env`, and brings the stack up.
 
 ## Full documentation
 
@@ -32,7 +33,7 @@ The rest of this README is a quick reference. Start with [`docs/installation.md`
 - Docker Engine with the Compose v2 plugin (`docker compose version` must work)
 - `openssl` (used to generate secrets)
 - `git` (used by `install.sh`)
-- `curl` (used by `scripts/broker.sh`)
+- `curl` (used by `scripts/set-hub-secret.sh` and the backup credential fetch)
 - A registry pull token — the shared `read:packages` PAT on the
   `voltini-autobot` machine account, distributed by the operator with each
   install. **Read-only on the two image repositories, nothing else.**
@@ -195,33 +196,31 @@ Two fixes:
 
 ### Image pull fails with `no basic auth credentials` or `denied`
 
-The update scripts say which credential they used, so start there:
+Image pulls use one credential — `GHCR_TOKEN` from `.env`. The connection key
+brokers backup credentials only and has no bearing on pulls.
 
 ```bash
 cd /opt/borzoi
 ./update.sh 2>&1 | head -20
-# "Registry credentials OK (broker credential)."  → brokered, working
-# "Registry credentials OK (static credential)."  → fell back to GHCR_TOKEN
-# "broker: … — falling back to static GHCR_TOKEN" → the broker failed; the
-#                                                   line says why
+# "Registry credentials OK."  → the login worked
 ```
 
-Test the static token directly:
+Test the token directly:
 
 ```bash
 source /opt/borzoi/.env
 printf '%s' "$GHCR_TOKEN" | docker login ghcr.io -u "$GHCR_USER" --password-stdin
 ```
 
-And the connection key:
+Separately, to check the connection key (backups):
 
 ```bash
 ./scripts/set-hub-secret.sh --check
 ```
 
-A `401` from the broker means the key is wrong or has been blocked in the
-portal — issue a new one. A `503` means central has not finished provisioning
-that half, which is harmless: the static token covers it.
+A `401` there means the key is wrong or has been blocked in the portal — issue a
+new one. A `503` means central has not provisioned cloud backup yet, which is
+harmless and still proves the key is valid.
 
 More detail: [docs/troubleshooting.md](docs/troubleshooting.md#registry-pull-failures).
 

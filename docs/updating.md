@@ -55,10 +55,8 @@ Details:
 - The sidecar is built locally from [`../updater/Dockerfile`](../updater/Dockerfile)
   (docker CLI + compose + curl) and runs [`../scripts/updater.sh`](../scripts/updater.sh).
   It is **never pushed to a registry**.
-- It logs in to `ghcr.io` itself via `registry_credential` in
-  [`../scripts/broker.sh`](../scripts/broker.sh) — a short-lived token brokered
-  through central when this Hub has a connection key, otherwise the static
-  `GHCR_TOKEN`. It then pulls + recreates **only the runtime services**
+- It logs in to `ghcr.io` itself in `registry_login()`, using `GHCR_TOKEN` from
+  `.env`. It then pulls + recreates **only the runtime services**
   (`postgres backend frontend nginx`), **excluding itself** so it isn't
   recreated mid-upgrade.
 - Progress lives in `data/upgrade/status.json`, which is on a bind mount and

@@ -83,7 +83,7 @@ sudo apt install -y openssl git jq curl
 - `openssl` — secret generation
 - `git` — fetching borzoi-deploy
 - `jq` — merging docker config (optional but nice)
-- `curl` — used by `scripts/broker.sh` to fetch short-lived credentials from central
+- `curl` — used by `scripts/set-hub-secret.sh` to verify the connection key against central
 
 No AWS tooling is needed. Images come from `ghcr.io` via a plain `docker login`,
 and the nightly backup's AWS credentials are fetched at run time by the AWS CLI

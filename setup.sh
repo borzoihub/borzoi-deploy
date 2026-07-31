@@ -274,7 +274,7 @@ fi
 # A Hub now holds NO long-lived AWS credential. The one thing that genuinely
 # needs AWS — the nightly database backup — obtains short-lived, per-Hub STS
 # credentials from central's broker using VOLTINI_HUB_SECRET, scoped to this
-# installation's own S3 prefix. See scripts/broker.sh and
+# installation's own S3 prefix. See docs/connection-key.md and
 # voltini.energy-backend/docs/HUB_CREDENTIAL_BROKER.md.
 
 BORZOI_ADMIN_EMAIL=$(ask "Bootstrap admin email" "")
@@ -381,6 +381,28 @@ JWT_SECRET=$JWT_SECRET
 # Bootstrap admin (created on first boot only)
 BORZOI_ADMIN_EMAIL=$BORZOI_ADMIN_EMAIL
 BORZOI_ADMIN_PASSWORD=$BORZOI_ADMIN_PASSWORD
+
+# ── Hub credential broker + cloud backup ───────────────────────────────────
+# Written blank on purpose. docker-compose.yml interpolates all four whether or
+# not the cloud-backup profile is active, and compose warns on an *undefined*
+# variable — an empty one is fine. Declaring them here is what keeps every
+# compose command quiet on a Hub that has not been issued a secret yet.
+#
+# Fill VOLTINI_HUB_SECRET / VOLTINI_INSTALLATION_ID with scripts/set-hub-secret.sh
+# (never by hand — it derives the installation id from the secret and verifies
+# against central before keeping either).
+#
+# These do NOT affect image pulls; that is GHCR_TOKEN above, always.
+VOLTINI_HUB_SECRET=
+VOLTINI_INSTALLATION_ID=
+VOLTINI_BROKER_URL=https://api.voltini.energy/api/hub/credentials
+
+# Cloud backup — inert until COMPOSE_PROFILES contains 'cloud-backup'.
+COMPOSE_PROFILES=
+BACKUP_S3_BUCKET=
+BACKUP_AWS_REGION=eu-north-1
+BACKUP_SCHEDULE=0 2 * * *
+BACKUP_RETENTION_DAYS=14
 
 EOF
 chmod 600 .env

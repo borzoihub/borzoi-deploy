@@ -60,29 +60,39 @@ this installation alone.
 ### Connection key — one per Hub
 
 - **Stored**: `VOLTINI_HUB_SECRET` in `/opt/borzoi/.env`, mode 600
-- **Used by**: the deploy/infra layer only — `scripts/broker.sh` for registry
-  tokens, and the `db-backup` container for backup uploads
-- **Scope**: exchanged for a ~1 h registry token, or for S3 credentials confined
-  to `s3://<bucket>/<installation-id>/*`
-- **Cost of leakage**: that Hub's own backups and the ability to pull images.
-  Block it in the portal and it stops working immediately, affecting no other
-  site.
+- **Used by**: the deploy/infra layer only — the `db-backup` container, for
+  backup uploads. That is the whole list; it is **not** used for image pulls
+  (see below)
+- **Scope**: exchanged for S3 credentials confined to
+  `s3://<bucket>/<installation-id>/*`
+- **Cost of leakage**: that Hub's own backups. Block it in the portal and it
+  stops working immediately, affecting no other site.
 
 Never read from `borzoi-backend/src`. The architecture permits this credential
 precisely because it stays in the deploy layer, and a CI check over that source
 tree enforces it. Full design:
 [connection-key.md](connection-key.md).
 
-### Registry pull token — shared, transitional
+### Registry pull token — shared, permanent
 
 `GHCR_USER` / `GHCR_TOKEN` in `.env`: a classic PAT with `read:packages` on the
-`voltini-autobot` machine account, identical on every Pi. `broker.sh` prefers a
-brokered token and falls back to this, logging when it does. Retire it per Hub
-once that Hub is using its connection key.
+`voltini-autobot` machine account, identical on every Pi. This is the only
+credential that pulls images.
 
-Leaking it lets an attacker pull compiled images — no source, no secrets — but
-it is the one credential a single stolen Pi still exposes fleet-wide, which is
-the reason to retire it.
+It was meant to be transitional, replaced per Hub by a token brokered through
+the connection key. That is impossible: GHCR accepts a classic PAT or an Actions
+`GITHUB_TOKEN` and nothing else, so the broker's registry half was removed on
+2026-07-31 rather than left in place solving nothing. See
+[connection-key.md](connection-key.md).
+
+Leaking it lets an attacker pull the images. Note that the backend image
+contains **`src/` — the full TypeScript source** (kept so the migrate one-shot
+can run under `tsx`), so this is source disclosure, not just binaries. It
+carries no credentials: the `.npmrc` is a BuildKit secret removed in the same
+layer, `.env` is excluded by `.dockerignore`, and no config file is baked in.
+
+It is the one credential a single stolen Pi exposes fleet-wide, and there is no
+mechanism to narrow that. Rotating means updating every Hub.
 
 ## What lives on the Pi
 

@@ -59,15 +59,14 @@ no basic auth credentials
 
 ### Diagnosis
 
-The update scripts log which credential they used, so start there:
+Image pulls use exactly one credential — `GHCR_TOKEN` from `.env`. The
+connection key is not involved (it only brokers backup credentials), so a Hub
+with no key, or a blocked key, still pulls normally.
 
 ```bash
 cd /opt/borzoi
 ./update.sh 2>&1 | head -20
-# "Registry credentials OK (broker credential)."   → brokered, working
-# "Registry credentials OK (static credential)."   → fell back to GHCR_TOKEN
-# "broker: … — falling back to static GHCR_TOKEN"  → the broker failed; the
-#                                                    line says why
+# "Registry credentials OK."   → the login worked
 ```
 
 Check the login by hand:
@@ -77,23 +76,15 @@ source /opt/borzoi/.env
 printf '%s' "$GHCR_TOKEN" | docker login ghcr.io -u "$GHCR_USER" --password-stdin
 ```
 
-And the connection key, if this Hub has one:
-
-```bash
-./scripts/set-hub-secret.sh --check
-```
-
 ### Fixes
 
-- **`broker: … HTTP 401`** — the connection key is wrong or has been blocked in
-  the portal. Issue a new one and install it with `set-hub-secret.sh`.
-- **`broker: … HTTP 503`** — central is reachable but its registry brokering is
-  not configured yet. Harmless: the fallback to `GHCR_TOKEN` covers it.
-- **`broker: cannot reach broker`** — no route to central. Pulls still work via
-  `GHCR_TOKEN`; the LP loop is unaffected either way.
-- **Both credentials failing** — `GHCR_TOKEN` may have been regenerated on the
-  `voltini-autobot` machine account. Re-run `setup.sh`, or edit `.env` and
-  `docker login` again.
+- **`GHCR_TOKEN is not set in .env`** — the Hub was set up before this value was
+  required, or it was blanked. Put the shared `read:packages` PAT back.
+- **`docker login … failed`** — `GHCR_TOKEN` may have been regenerated on the
+  `voltini-autobot` machine account. It is shared fleet-wide, so if one Hub is
+  affected, all are. Update `.env` on each and `docker login` again.
+- **`denied` / `403` on pull despite a successful login** — the PAT is valid but
+  lacks `read:packages`, or the package is no longer linked to its repo.
 - **Certificate errors after a long outage** — a Pi has no battery-backed clock,
   so after a power cut it can boot weeks in the past and reject certificates
   issued during the gap as "not yet valid". Check `date`; it self-heals once NTP
