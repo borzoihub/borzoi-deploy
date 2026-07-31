@@ -46,11 +46,11 @@ SELECT value FROM settings WHERE key = 'device_config';
 ```
 Look for nullable fields (e.g. `gridPower`, `solarPower`, `batteryLevel`) — these must be set to actual device IDs.
 
-## ECR pull failures
+## Registry pull failures
 
 ### Symptom
 ```
-Error response from daemon: pull access denied for <registry>/borzoi-backend
+Error response from daemon: pull access denied for ghcr.io/borzoihub/borzoi-backend
 ```
 or
 ```
@@ -59,34 +59,45 @@ no basic auth credentials
 
 ### Diagnosis
 
-Verify the ECR credential helper and wrapper:
+The update scripts log which credential they used, so start there:
 
 ```bash
-which docker-credential-ecr-login                  # /usr/bin/... or similar
-which docker-credential-borzoi-ecr-login           # /usr/local/bin/...
-cat ~/.docker/config.json                           # should map registry → borzoi-ecr-login
+cd /opt/borzoi
+./update.sh 2>&1 | head -20
+# "Registry credentials OK (broker credential)."   → brokered, working
+# "Registry credentials OK (static credential)."   → fell back to GHCR_TOKEN
+# "broker: … — falling back to static GHCR_TOKEN"  → the broker failed; the
+#                                                    line says why
 ```
 
-Verify the ECR creds work (note the explicit profile):
+Check the login by hand:
 
 ```bash
-AWS_PROFILE=borzoi-ecr aws sts get-caller-identity
-AWS_PROFILE=borzoi-ecr aws ecr get-login-password --region eu-north-1 >/dev/null && echo OK
+source /opt/borzoi/.env
+printf '%s' "$GHCR_TOKEN" | docker login ghcr.io -u "$GHCR_USER" --password-stdin
+```
+
+And the connection key, if this Hub has one:
+
+```bash
+./scripts/set-hub-secret.sh --check
 ```
 
 ### Fixes
 
-- **Helper missing**: `sudo apt install amazon-ecr-credential-helper`
-- **Wrapper missing**: re-run `setup.sh` or copy manually:
-  ```bash
-  sudo tee /usr/local/bin/docker-credential-borzoi-ecr-login >/dev/null <<'WRAPPER'
-  #!/bin/sh
-  AWS_PROFILE=borzoi-ecr exec docker-credential-ecr-login "$@"
-  WRAPPER
-  sudo chmod +x /usr/local/bin/docker-credential-borzoi-ecr-login
-  ```
-- **`[borzoi-ecr]` profile missing**: open `~/.aws/credentials` and add it (see installation.md for format)
-- **IAM perms missing**: the shared installer user must have `ecr:GetAuthorizationToken`, `ecr:BatchGetImage`, `ecr:GetDownloadUrlForLayer`, `ecr:BatchCheckLayerAvailability` for both repos. See [operator-setup.md § 5](operator-setup.md#5-create-the-shared-ecr-pull-iam-user).
+- **`broker: … HTTP 401`** — the connection key is wrong or has been blocked in
+  the portal. Issue a new one and install it with `set-hub-secret.sh`.
+- **`broker: … HTTP 503`** — central is reachable but its registry brokering is
+  not configured yet. Harmless: the fallback to `GHCR_TOKEN` covers it.
+- **`broker: cannot reach broker`** — no route to central. Pulls still work via
+  `GHCR_TOKEN`; the LP loop is unaffected either way.
+- **Both credentials failing** — `GHCR_TOKEN` may have been regenerated on the
+  `voltini-autobot` machine account. Re-run `setup.sh`, or edit `.env` and
+  `docker login` again.
+- **Certificate errors after a long outage** — a Pi has no battery-backed clock,
+  so after a power cut it can boot weeks in the past and reject certificates
+  issued during the gap as "not yet valid". Check `date`; it self-heals once NTP
+  syncs.
 
 ## postgres won't start / "password authentication failed"
 

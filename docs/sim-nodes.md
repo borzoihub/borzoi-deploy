@@ -11,7 +11,7 @@ appears on the installer portal's **Background jobs** page.
 Sim nodes give simulations the same lifecycle as a real Hub:
 
 - **Install once** from a clone — no per-machine image build.
-- **Pull a prebuilt multi-arch image** from ECR (amd64 or arm64 automatically).
+- **Pull a prebuilt multi-arch image** from GHCR (amd64 or arm64 automatically).
 - **Self-update OTA** via the same updater sidecar the Hub uses — triggered by
   an `update` job on the queue, so no Cloudflare Tunnel per node is needed.
 
@@ -29,7 +29,7 @@ cd borzoi-deploy
 ```
 
 `install-sim.sh` obtains the **sim bundle** (see below), then writes `.env`
-(mode 0600), installs the ECR credential helper, pulls the sim image, and brings
+(mode 0600), logs in to `ghcr.io`, pulls the sim image, and brings
 up two containers (`borzoi-sim` + `borzoi-sim-updater`) defined in
 [`docker-compose.sim.yml`](../docker-compose.sim.yml).
 
@@ -54,27 +54,25 @@ docker compose -f docker-compose.sim.yml logs -f sim # logs
 ### The sim bundle
 
 A flat JSON the operator builds **once on their own machine** and reuses across
-every node. It is **not** new credentials — it's your **existing shared ECR
-installer creds** plus the coordinator URL and one worker token:
+every node. It is **not** new credentials — it's the **same registry pull token**
+your Hubs use, plus the coordinator URL and one worker token:
 
 ```json
 {
-  "ecr_region":        "eu-north-1",
-  "ecr_registry":      "<account>.dkr.ecr.<region>.amazonaws.com",
-  "access_key_id":     "AKIA...",
-  "secret_access_key": "...",
+  "registry":          "ghcr.io/borzoihub",
+  "ghcr_user":         "voltini-autobot",
+  "ghcr_token":        "ghp_...",
   "coordinator_url":   "https://api.voltini.energy",
   "worker_token":      "<long-lived WorkerService JWT>"
 }
 ```
 
-Build it with one command (reuses `installer-creds.json` — the **same** ECR
-credential your Hubs use, so do **not** run `aws-setup.sh` — and mints the
-worker token for you):
+Build it with one command (reuses `installer-creds.json` and mints the worker
+token for you):
 
 ```bash
 ./make-sim-bundle.sh
-#   → reuses installer-creds.json (ECR creds)
+#   → reuses installer-creds.json (registry pull token)
 #   → mints a Production WorkerService token via ../voltini.energy-backend
 #   → writes sim-bundle.json (mode 600)
 ```
@@ -84,9 +82,8 @@ Flags: `--voltini-dir <path>` if that repo isn't a sibling, `--deployment Local`
 to **reuse** an existing token instead of minting a new one.
 
 Minting needs that environment's **DB access** *and* its **`JWT_SECRET`** (the
-token is signed with it; `config.Production.json` ships an empty placeholder and
-the secret is injected from the env). So either run with the secret in the
-shell:
+token is signed with it, and the secret is injected from the environment rather
+than living in any config file). So either run with the secret in the shell:
 
 ```bash
 JWT_SECRET='<prod jwt secret>' ./make-sim-bundle.sh
@@ -98,11 +95,14 @@ or mint on the prod host (where `JWT_SECRET` already lives) and pass the result:
 ./make-sim-bundle.sh --token '<JWT minted on prod>'
 ```
 
-- `ecr_*` / `access_key_id` / `secret_access_key` — your existing shared ECR
-  read credentials. If `installer-creds.json` isn't on this machine, copy it
-  from your password manager or any deployed Hub (`~/.aws/credentials`
-  `[borzoi-ecr]` + the `ECR_REGISTRY` line in `/opt/borzoi/.env`) — it's the
-  same credential. See [customer-onboarding.md](customer-onboarding.md).
+- `registry` / `ghcr_user` / `ghcr_token` — the same `read:packages` pull token
+  every Hub uses. If `installer-creds.json` isn't on this machine, copy the
+  `REGISTRY` / `GHCR_USER` / `GHCR_TOKEN` lines from any deployed Hub's
+  `/opt/borzoi/.env`. See [customer-onboarding.md](customer-onboarding.md).
+
+  > A sim node is operator-run infrastructure, not a customer Hub, so it gets no
+  > connection key — it has no database to back up and nothing per-installation
+  > to scope.
 - `coordinator_url` — the central job-queue base URL (prod:
   `https://api.voltini.energy`).
 - `worker_token` — a 180-day WorkerService JWT minted by central; authenticates
@@ -122,7 +122,7 @@ both are skipped when sourced non-interactively (defaults apply).
 
 OTA is **identical to the full Hub from `data/upgrade/request.json` onward** —
 same `updater` sidecar ([`scripts/updater.sh`](../scripts/updater.sh)), same
-ECR-login → pull → recreate sequence, same `status.json`. Only two things differ:
+registry-login → pull → recreate sequence, same `status.json`. Only two things differ:
 
 1. **Trigger.** A Hub is updated by an inbound call through its Cloudflare
    Tunnel. A sim node has no inbound path, so instead the update rides the job
@@ -145,15 +145,17 @@ behind the latest published image shows as outdated, with an **Update** button.
 
 ## Operator: publishing a multi-arch image
 
-Sim nodes run on mixed hardware (x86_64 cloud/desktops **and** arm64), so ECR
-must serve a **multi-arch manifest** for `borzoi-backend`. The Hub-only build
-(`npm run docker:build`) is arm64 + `--load` and cannot be used here.
+Sim nodes run on mixed hardware (x86_64 cloud/desktops **and** arm64), so the
+registry must serve a **multi-arch manifest** for `borzoi-backend`.
 
-In **borzoi-backend**, publish with:
+CI already does this. `borzoi-backend`'s `.github/workflows/deploy.yml` builds
+each platform on its own native runner (rather than emulating one under QEMU)
+and pushes a combined manifest to `ghcr.io/borzoihub/borzoi-backend`:
 
 ```bash
-npm run docker:login     # authenticate to ECR
-npm run docker:release   # version:bump → docker:buildx (amd64+arm64) → push
+cd /path/to/borzoi-backend
+npm version patch
+git push --follow-tags   # CI builds amd64 + arm64 and publishes
 ```
 
 `docker:buildx` runs

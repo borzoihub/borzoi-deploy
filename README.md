@@ -4,20 +4,23 @@
 
 A self-contained deploy bundle for running the full Borzoi stack
 (backend + frontend + TimescaleDB + nginx) on a single host — typically
-a Raspberry Pi 4 or 5. Images are pulled from a private Amazon ECR
-registry using per-customer IAM credentials; no source code or
-developer credentials live on the device. A single `setup.sh` run
-generates secrets, writes a `.env`, and brings the stack up.
+a Raspberry Pi 4 or 5. Images are pulled from GitHub Container Registry
+(`ghcr.io/borzoihub`). No source code, no developer credentials and **no
+long-lived cloud credential** live on the device — the Hub holds one
+connection key for Voltini central and exchanges it per use for short-lived
+registry and backup access. A single `setup.sh` run generates secrets, writes
+a `.env`, and brings the stack up.
 
 ## Full documentation
 
 See [`docs/`](docs/README.md) for the complete guide:
 
 - [Architecture](docs/architecture.md) — how the pieces fit together
-- [Operator setup](docs/operator-setup.md) — one-time: ECR, IAM, image publishing
-- [Customer onboarding](docs/customer-onboarding.md) — per-customer: IAM, credentials packet
+- [Operator setup](docs/operator-setup.md) — one-time: registry account, CI image publishing
+- [Customer onboarding](docs/customer-onboarding.md) — per-customer: connection key, credentials packet
 - [Installation guide](docs/installation.md) — fresh Raspberry Pi, step by step
-- [TLS / HTTPS](docs/tls.md) — Let's Encrypt setup
+- [Connection key](docs/connection-key.md) — installing, replacing and blocking a Hub's credential; cloud backups
+- [TLS / HTTPS](docs/tls.md) — direct-internet installs only
 - [Updating](docs/updating.md) — releases, pinning, rollback, backup/restore
 - [Troubleshooting](docs/troubleshooting.md) — diagnosing common problems
 
@@ -29,20 +32,17 @@ The rest of this README is a quick reference. Start with [`docs/installation.md`
 - Docker Engine with the Compose v2 plugin (`docker compose version` must work)
 - `openssl` (used to generate secrets)
 - `git` (used by `install.sh`)
-- `sudo` access (used to install the ECR credential helper)
-- Optional but recommended: `aws-cli` — when present, `setup.sh`
-  validates your AWS credentials and auto-fills the ECR registry URL
-- ECR pull credentials (shared installer IAM user, distributed by the
-  operator with each install). Permissions:
-  `ecr:GetAuthorizationToken`, `ecr:BatchGetImage`,
-  `ecr:GetDownloadUrlForLayer`, `ecr:BatchCheckLayerAvailability`,
-  scoped to the `borzoi-backend` and `borzoi-frontend` repositories
-  only. **Pull-only — no other AWS access.**
-- A DNS record pointing your chosen domain at this host
+- `curl` (used by `scripts/broker.sh`)
+- A registry pull token — the shared `read:packages` PAT on the
+  `voltini-autobot` machine account, distributed by the operator with each
+  install. **Read-only on the two image repositories, nothing else.**
+- A connection key for this installation, issued from the installer portal
+- A DNS record pointing your chosen domain at this host, or a Cloudflare
+  Tunnel token
 
-Note: the backend has code paths for S3 and SES but they are not
-currently used by the product. `setup.sh` writes placeholder AWS
-credentials; no per-customer AWS account is required today.
+No AWS tooling and no AWS credentials are needed on the host. The nightly
+backup's credentials are fetched at run time, from central, by the AWS CLI
+inside the backup container.
 
 ## Install
 
@@ -61,10 +61,15 @@ cd /opt/borzoi
 ./setup.sh
 ```
 
-`setup.sh` is interactive. It will prompt for the domain, the **ECR
-pull credentials** (a shared installer IAM user), and an admin email.
-It auto-generates the DB password, JWT secret, and bootstrap admin
-password.
+`setup.sh` is interactive. It will prompt for the domain, the **registry pull
+token**, and an admin email. It auto-generates the DB password, JWT secret and
+bootstrap admin password.
+
+Afterwards, install this Hub's connection key:
+
+```bash
+./scripts/set-hub-secret.sh
+```
 
 ### Simulation nodes
 
@@ -74,10 +79,6 @@ prompted). A sim node is the same `borzoi-backend` image in
 `BORZOI_MODE=sim` — no DB/frontend/nginx — that pulls work from the
 central job queue and self-updates OTA. See
 [docs/sim-nodes.md](docs/sim-nodes.md).
-
-ECR creds are stored in `~/.aws/credentials` under the `[borzoi-ecr]`
-profile, used by a wrapper around `amazon-ecr-credential-helper` so
-`docker pull` works indefinitely without manual token refresh.
 
 The admin login is printed once at the end — **save it**, it is not
 stored anywhere.
@@ -192,36 +193,44 @@ Two fixes:
 - **Rotate in-cluster** — exec into the running container and run
   `ALTER USER borzoi WITH PASSWORD '<new>';` before updating `.env`.
 
-### ECR pull fails with `no basic auth credentials` or `denied`
+### Image pull fails with `no basic auth credentials` or `denied`
 
-The ECR credential helper translates IAM creds → ECR tokens, so the
-underlying issue is almost always with the ECR IAM creds in
-`~/.aws/credentials [borzoi-ecr]` (or with that user's permissions).
-
-Verify the helper and wrapper are installed and configured:
+The update scripts say which credential they used, so start there:
 
 ```bash
-which docker-credential-ecr-login                  # should exist
-which docker-credential-borzoi-ecr-login           # should exist (wrapper)
-cat ~/.docker/config.json                          # should map registry → borzoi-ecr-login
+cd /opt/borzoi
+./update.sh 2>&1 | head -20
+# "Registry credentials OK (broker credential)."  → brokered, working
+# "Registry credentials OK (static credential)."  → fell back to GHCR_TOKEN
+# "broker: … — falling back to static GHCR_TOKEN" → the broker failed; the
+#                                                   line says why
 ```
 
-Verify the ECR creds work (note the explicit profile):
+Test the static token directly:
 
 ```bash
-AWS_PROFILE=borzoi-ecr aws sts get-caller-identity
-AWS_PROFILE=borzoi-ecr aws ecr get-login-password --region eu-north-1 >/dev/null && echo OK
+source /opt/borzoi/.env
+printf '%s' "$GHCR_TOKEN" | docker login ghcr.io -u "$GHCR_USER" --password-stdin
 ```
 
-If those work but `docker compose pull` still fails, the ECR IAM user
-is missing one of `ecr:GetAuthorizationToken`, `ecr:BatchGetImage`, or
-`ecr:GetDownloadUrlForLayer`.
+And the connection key:
 
-### Rotating the ECR pull credentials
+```bash
+./scripts/set-hub-secret.sh --check
+```
 
-Edit `~/.aws/credentials` and replace the values under
-`[borzoi-ecr]`. No other change needed — the wrapper picks up the new
-creds on the next `docker pull`.
+A `401` from the broker means the key is wrong or has been blocked in the
+portal — issue a new one. A `503` means central has not finished provisioning
+that half, which is harmless: the static token covers it.
+
+More detail: [docs/troubleshooting.md](docs/troubleshooting.md#registry-pull-failures).
+
+### Replacing or blocking a Hub's connection key
+
+Both are portal actions — see
+[docs/connection-key.md](docs/connection-key.md). Replacing is safe on a site in
+service: the current key keeps working until the Hub has picked up the new one,
+and central refuses to start a replacement unless the Hub is answering.
 
 ### nginx can't find the frontend files
 

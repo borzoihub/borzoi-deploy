@@ -14,21 +14,20 @@
 │       │  serves static files from shared volume        │             │
 │       └────────────────────────────────────────────────┘             │
 │                                                                       │
-│  Pulled from ECR:      ${ECR_REGISTRY}/borzoi-backend:${BACKEND_TAG} │
-│                        ${ECR_REGISTRY}/borzoi-frontend:${FRONTEND_TAG}│
+│  Pulled from GHCR:     ${REGISTRY}/borzoi-backend:${BACKEND_TAG}     │
+│                        ${REGISTRY}/borzoi-frontend:${FRONTEND_TAG}   │
 │                                                                       │
 └───────────────────────────────────────────────────────────────────────┘
                             ▲
                             │
-                    ECR pull creds
-                    (shared installer)
+                  registry pull token
+                (brokered, or shared PAT)
                             │
                             ▼
-                      ┌──────────┐
-                      │   ECR    │
-                      │ (your    │
-                      │  account)│
-                      └──────────┘
+                     ┌─────────────┐
+                     │   ghcr.io   │
+                     │  /borzoihub │
+                     └─────────────┘
 ```
 
 ## Containers
@@ -36,8 +35,8 @@
 | Service | Image | Role | Restart |
 |---|---|---|---|
 | `postgres` | `timescale/timescaledb:2.17.2-pg16` | Storage (entities + TimescaleDB hypertables) | `unless-stopped` |
-| `backend` | `${ECR_REGISTRY}/borzoi-backend:...` | Node.js API on :3100, runs migrations + bootstrap-admin at startup | `unless-stopped` |
-| `frontend` | `${ECR_REGISTRY}/borzoi-frontend:...` | One-shot: copies compiled Angular output into the shared `frontend-static` volume, exits 0 | `no` |
+| `backend` | `${REGISTRY}/borzoi-backend:...` | Node.js API on :3100, runs migrations + bootstrap-admin at startup | `unless-stopped` |
+| `frontend` | `${REGISTRY}/borzoi-frontend:...` | One-shot: copies compiled Angular output into the shared `frontend-static` volume, exits 0 | `no` |
 | `nginx` | `nginx:1.27-alpine` | Reverse proxy. Serves `/` from the shared volume, proxies `/api/*` → backend | `unless-stopped` |
 
 Startup ordering is expressed via compose `depends_on`:
@@ -51,27 +50,39 @@ postgres (healthy)
 
 The `migrate` step that used to exist as a separate container was folded into backend boot — it now runs right after `initServiceState()` and before `initBootstrapAdmin()`.
 
-## Credentials model (two separate cred sets)
+## Credentials model
 
-The Pi holds **two AWS credential sets** which never cross over:
+**The Pi holds no long-lived cloud credential.** No AWS key, no per-customer IAM
+user, nothing that grants standing access to anything. It holds one credential
+for *Voltini central* and exchanges it, per use, for short-lived access scoped to
+this installation alone.
 
-### 1. ECR pull credentials — shared installer user
+### Connection key — one per Hub
 
-- **Scope**: ECR pull on `borzoi-backend` and `borzoi-frontend` repos only
-- **Stored**: `~/.aws/credentials` under `[borzoi-ecr]` profile
-- **Used by**: docker daemon (via the `amazon-ecr-credential-helper`) for `docker pull`
-- **Reused** across every customer install — same IAM user, same keys
-- **Cost of leakage**: attacker can pull compiled images (no source, no secrets)
+- **Stored**: `VOLTINI_HUB_SECRET` in `/opt/borzoi/.env`, mode 600
+- **Used by**: the deploy/infra layer only — `scripts/broker.sh` for registry
+  tokens, and the `db-backup` container for backup uploads
+- **Scope**: exchanged for a ~1 h registry token, or for S3 credentials confined
+  to `s3://<bucket>/<installation-id>/*`
+- **Cost of leakage**: that Hub's own backups and the ability to pull images.
+  Block it in the portal and it stops working immediately, affecting no other
+  site.
 
-A wrapper script at `/usr/local/bin/docker-credential-borzoi-ecr-login` pins `AWS_PROFILE=borzoi-ecr` before exec'ing the real `docker-credential-ecr-login`. This ensures docker auth never accidentally reads from `[default]` or any other profile that might be present on the host.
+Never read from `borzoi-backend/src`. The architecture permits this credential
+precisely because it stays in the deploy layer, and a CI check over that source
+tree enforces it. Full design:
+[connection-key.md](connection-key.md).
 
-### 2. App AWS credentials — placeholder today
+### Registry pull token — shared, transitional
 
-The backend reads `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `S3_BUCKET`, `SES_SENDER`, and `AWS_REGION` from `.env` at startup. These feed `StorageService` (S3) and `EmailService` (SES) initialization. Neither service is currently used by any product feature — uploads, password-reset emails, and verification emails are all dormant code paths.
+`GHCR_USER` / `GHCR_TOKEN` in `.env`: a classic PAT with `read:packages` on the
+`voltini-autobot` machine account, identical on every Pi. `broker.sh` prefers a
+brokered token and falls back to this, logging when it does. Retire it per Hub
+once that Hub is using its connection key.
 
-`setup.sh` writes placeholder values for these so the entrypoint's env-var validation passes. The backend successfully initializes the AWS SDK clients but never actually makes an API call against AWS with them.
-
-If/when S3 or SES become active in the product, each customer needs a per-customer IAM user scoped to their resources; edit `.env` with real credentials and restart the backend. The setup procedure is captured in [customer-onboarding.md § Future: per-customer AWS setup](customer-onboarding.md#future-per-customer-aws-setup).
+Leaking it lets an attacker pull compiled images — no source, no secrets — but
+it is the one credential a single stolen Pi still exposes fleet-wide, which is
+the reason to retire it.
 
 ## What lives on the Pi
 
@@ -88,19 +99,15 @@ TLS is terminated externally by Cloudflare Tunnel (see [cloudflare-tunnel.md](cl
 
 Outside `/opt/borzoi`:
 
-- `~/.aws/credentials` — ECR creds under `[borzoi-ecr]`
-- `~/.aws/config` — `[profile borzoi-ecr]` region
-- `~/.docker/config.json` — credHelper mapping for the ECR registry
-- `/usr/local/bin/docker-credential-borzoi-ecr-login` — wrapper script
+- `~/.docker/config.json` — the `ghcr.io` login written by `docker login`
 
-No source code, no developer tokens, no personal GitHub accounts are ever on the Pi.
+There is no `~/.aws` and no credential-helper binary. No source code, no
+developer tokens and no personal GitHub accounts are ever on the Pi.
 
 ## Backend boot sequence
 
 ```
-initConfig           load JSON config
-initStorage          AWS S3 SDK (requires real creds)
-initEmail            AWS SES SDK (requires real creds)
+initConfig           load config
 initDatabase         connect to postgres
 initExpress          listen on :3100
 initSmart            homey / homeassistant clients
@@ -122,6 +129,6 @@ The scheduler, flow-temp regulator, and ingestion services read their configurat
 
 Exceptions where a restart is still needed:
 - Hardware ID changes (e.g. you swap the EV charger and the new unit has a different Homey device ID)
-- `.env` changes (DB password, AWS keys, JWT secret) — these are read once on boot
+- `.env` changes (DB password, connection key, JWT secret) — these are read once on boot
 
 See the backend's `src/services/scheduler.service.ts` `loadTickConfig()` method for the implementation.

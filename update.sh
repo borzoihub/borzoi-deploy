@@ -23,6 +23,11 @@ set -a
 source .env
 set +a
 
+# Credential-broker client — supplies `registry_credential`, which prefers a
+# short-lived token brokered through central and falls back to the static
+# GHCR_TOKEN. Kept in step with scripts/updater.sh (the OTA path).
+source ./scripts/broker.sh
+
 # ---------- pre-update backup ------------------------------------------------
 
 info "Taking pre-update database backup..."
@@ -55,22 +60,26 @@ fi
 
 # ---------- registry credential ----------------------------------------------
 
-# GHCR needs an explicit `docker login`. Unlike the old ECR credential helper
-# there is no token exchange — GHCR_TOKEN is a read:packages PAT read from
-# .env. Logging in each run is cheap and idempotent, and keeps a host that was
-# restored from backup (or whose ~/.docker was cleared) working without a
-# manual step.
+# GHCR needs an explicit `docker login`. The password comes from
+# `registry_credential`: a short-lived token brokered through central when this
+# Hub has its central secret, else the static read:packages PAT. Logging in each
+# run is cheap and idempotent, and keeps a host that was restored from backup
+# (or whose ~/.docker was cleared) working without a manual step — which matters
+# more now, since a brokered token expires in about an hour.
 info "Authenticating to ${REGISTRY%%/*}..."
-if [ -z "${GHCR_TOKEN:-}" ]; then
-  err "GHCR_TOKEN is not set in .env — cannot pull images. See docs/updating.md."
+# Not `$(registry_credential)` — that subshell would discard BROKER_ERR and
+# REGISTRY_CRED_SOURCE and leave the failure message blank. See scripts/broker.sh.
+if ! registry_credential; then
+  err "${BROKER_ERR}. See docs/updating.md."
   exit 1
 fi
-if printf '%s' "$GHCR_TOKEN" | docker login "${REGISTRY%%/*}" -u "${GHCR_USER:-voltini-autobot}" --password-stdin >/dev/null 2>&1; then
-  info "Registry credentials OK."
+if printf '%s' "$REGISTRY_CREDENTIAL" | docker login "${REGISTRY%%/*}" -u "${GHCR_USER:-voltini-autobot}" --password-stdin >/dev/null 2>&1; then
+  info "Registry credentials OK (${REGISTRY_CRED_SOURCE} credential)."
 else
-  err "docker login to ${REGISTRY%%/*} failed. Check GHCR_USER/GHCR_TOKEN in .env."
+  err "docker login to ${REGISTRY%%/*} failed using the ${REGISTRY_CRED_SOURCE} credential."
   exit 1
 fi
+unset REGISTRY_CREDENTIAL
 
 # ---------- pull + resolve versions ------------------------------------------
 

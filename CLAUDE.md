@@ -3,8 +3,11 @@
 Self-contained deploy bundle for running the full Voltini Hub stack
 (`borzoi-backend` + `borzoi-frontend` + TimescaleDB + nginx) on a single
 host — typically a Raspberry Pi 4 or 5 in a customer's home. Images are
-pulled from a private Amazon ECR registry using per-customer IAM credentials;
-no source code or developer credentials live on the device.
+pulled from GitHub Container Registry (`ghcr.io/borzoihub`). No source code,
+no developer credentials and **no long-lived cloud credential** live on the
+device: the Hub holds one connection key for Voltini central and exchanges it
+per use for short-lived registry and backup access
+(see [`docs/connection-key.md`](docs/connection-key.md)).
 
 Full operator/installer documentation lives in [`docs/`](docs/README.md) and
 the top-level [`README.md`](README.md). This CLAUDE.md only exists to give
@@ -72,6 +75,6 @@ catalogue of Hubs.
 ### What this bundle does, in one line
 
 `setup.sh` on a fresh Raspberry Pi → Docker Compose pulls Hub images from
-ECR → TimescaleDB comes up → `borzoi-backend` + `borzoi-frontend` come up
-behind nginx with Let's Encrypt TLS → the Hub is reachable on the LAN and
-(after registration) to the central backend for SSO.
+GHCR → TimescaleDB comes up → `borzoi-backend` + `borzoi-frontend` come up
+behind nginx → the Hub is reachable on the LAN and, through a Cloudflare
+Tunnel, to the central backend for SSO.

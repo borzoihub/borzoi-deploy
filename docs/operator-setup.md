@@ -1,164 +1,99 @@
 # Operator setup (one-time)
 
-Work you do **once** as the developer before any customer installation. Most of this happens on your Mac.
+Work you do **once**, before any customer installation.
+
+Images live in **GitHub Container Registry** (`ghcr.io/borzoihub`) and are built
+and published by each repo's GitHub Actions workflow. You do not build or push
+images by hand, and there is **no AWS in this path at all** — no ECR, no
+registry IAM user, no per-customer IAM user.
 
 ## Prerequisites
 
-- An AWS account you control (for ECR, and separate sub-accounts or IAM users per customer for S3 + SES)
-- `aws-cli` v2 installed and configured on your Mac
-- Docker Desktop (or equivalent) with Buildx
-- A GitHub account with access to the `@borzoihub/*` and `@digistrada/*` npm packages
-- A GitHub Personal Access Token with `read:packages` scope — needed only for **building** images locally, not for running them
+- Owner/admin on the `borzoihub` GitHub org
+- A GitHub account with access to the `@borzoihub/*` and `@digistrada/*` npm
+  packages
+- Docker Desktop (or equivalent) — only if you want to build images locally;
+  CI does it otherwise
 
-## 1. Stash the GitHub Packages token for image builds
+## 1. The machine account and its pull token
 
-The backend and frontend Dockerfiles use a BuildKit secret to auth against GitHub Packages. Put the token in a file with mode 600:
+Every Pi authenticates to `ghcr.io` as a machine account. `voltini-autobot` is a
+member of `borzoihub` and holds a **classic PAT with `read:packages` and nothing
+else**, deliberately set never to expire so it cannot lapse on a fleet nobody is
+watching.
+
+This token is what `setup.sh` asks for, and it goes into `GHCR_TOKEN` in each
+Pi's `.env`.
+
+> **It is transitional.** A shared token has no per-Hub revocation, and rotating
+> it means touching every Pi. Once a Hub has its own connection key, the update
+> scripts broker a short-lived token instead and this one becomes a fallback —
+> see [connection-key.md](connection-key.md). With two Hubs in the operator's
+> own home it is proportionate; it stops being proportionate once the fleet is
+> in customers' houses.
+
+## 2. Local build token (only if you build by hand)
+
+The Dockerfiles use a BuildKit secret to auth against GitHub Packages during
+`npm ci`. It is never baked into the image.
 
 ```bash
 echo "ghp_your_token_here" > ~/.borzoi-github-packages-token
 chmod 600 ~/.borzoi-github-packages-token
 ```
 
-The secret is never baked into the image — BuildKit mounts it only for the duration of `npm ci`.
+Needed only for local builds (e.g. `npm run docker:build:sim`). CI uses its own
+credentials.
 
-## 2. Set the ECR registry env var
+## 3. Publishing images
 
-Add this to your shell profile (`~/.zshrc` / `~/.bashrc`):
-
-```bash
-export BORZOI_ECR_REGISTRY=<account-id>.dkr.ecr.<region>.amazonaws.com
-export AWS_REGION=eu-north-1
-```
-
-Replace `<account-id>` and `<region>` with your AWS account and region.
-
-## 3. Create ECR repos + shared installer IAM user (automated)
-
-The `scripts/aws-setup.sh` in `borzoi-deploy` handles everything in one shot: creates the two ECR repos, creates the `borzoi-installer` IAM user, writes its inline policy, and issues access keys. Idempotent — safe to re-run.
-
-```bash
-cd /path/to/borzoi-deploy
-./scripts/aws-setup.sh
-```
-
-The script:
-1. **Asks for AWS admin credentials** interactively. These are held in environment variables for the duration of the script only — never written to disk, never committed to shell history, gone when the script exits.
-2. Creates `borzoi-backend` and `borzoi-frontend` ECR repos (scan-on-push enabled, AES256 encryption).
-3. Creates or updates the `borzoi-installer` IAM user with a policy scoped to pull-only on just those two repos.
-4. Issues a new access key (on first run), or reports the existing key ID (on re-runs).
-5. **Prints the installer credentials JSON to stdout** (copy-paste-ready for `setup.sh`) **and writes it to `./installer-creds.json`** (mode 600) for safekeeping on the operator machine. The file is gitignored. Pass `--json-out /dev/null` to skip the file write.
-
-Flags:
-- `--region <aws-region>` — override the region (default `$AWS_REGION` or `eu-north-1`)
-- `--rotate-key` — delete existing access keys and issue a new one. Use when rotating on schedule or if you've lost the secret.
-
-**Save the printed JSON block (or the `installer-creds.json` file) somewhere durable** — password manager is ideal. The secret is shown only at creation time and is not retrievable from AWS later. If you lose it, re-run with `--rotate-key` to issue a new access key.
-
-**Flags:**
-- `--region <aws-region>` — override the region
-- `--rotate-key` — delete existing access keys and issue a new one
-- `--json-out <path>` — override the file output path (default `./installer-creds.json`). Pass `/dev/null` to skip writing the file.
-
-## 3a. Manual equivalent (if you prefer not to run the script)
-
-Everything the script does, you can do by hand:
-
-```bash
-# ECR repos
-aws ecr create-repository --repository-name borzoi-backend \
-  --region eu-north-1 --image-scanning-configuration scanOnPush=true
-aws ecr create-repository --repository-name borzoi-frontend \
-  --region eu-north-1 --image-scanning-configuration scanOnPush=true
-
-# IAM user
-aws iam create-user --user-name borzoi-installer
-aws iam put-user-policy --user-name borzoi-installer \
-  --policy-name borzoi-ecr-pull \
-  --policy-document file://borzoi-installer-policy.json
-aws iam create-access-key --user-name borzoi-installer
-```
-
-The `borzoi-installer-policy.json` template appears in step 5 below.
-
-## 4. Publishing images
-
-One-time auth per 12-hour ECR token lifetime:
+CI does it. Each of `borzoi-backend` and `borzoi-frontend` has a
+`.github/workflows/deploy.yml` that builds **multi-arch** (`linux/amd64` +
+`linux/arm64`, one runner per platform rather than QEMU emulation) and pushes to
+`ghcr.io/borzoihub/<name>`.
 
 ```bash
 cd /path/to/borzoi-backend
-npm run docker:login
+npm version patch        # or minor/major
+git push --follow-tags   # CI builds and publishes
 ```
 
-Then bump the version and release:
+A Pi only ever pulls. Nothing on the host builds anything, which is why the
+`updater` sidecar is the one image built locally (`pull_policy: build`) — it
+must never be fetched from a registry.
+
+## 4. Central infrastructure
+
+For the S3 bucket and IAM role behind Hub backups, run the provisioning script
+in the central backend repo — the only place AWS still appears in this system:
 
 ```bash
-# In borzoi-backend
-npm version patch  # or minor/major
-npm run docker:release
-
-# In borzoi-frontend
-npm version patch
-npm run docker:release
+cd /path/to/voltini.energy-backend
+./scripts/setup-hub-backup-aws.sh \
+    --bucket voltini-hub-backups \
+    --central-principal arn:aws:iam::<account>:user/voltini-backend
 ```
 
-`docker:release` does:
-1. `docker buildx build --platform linux/arm64 --secret id=ghtoken,src=~/.borzoi-github-packages-token --load -t $BORZOI_ECR_REGISTRY/borzoi-<name>:<version> -t $BORZOI_ECR_REGISTRY/borzoi-<name>:latest .`
-2. `docker push` both tags
+Details, including why the role must stay narrow:
+[`voltini.energy-backend/docs/HUB_CREDENTIAL_BROKER.md`](../../voltini.energy-backend/docs/HUB_CREDENTIAL_BROKER.md).
 
-Native arm64 build takes ~1-2 minutes on Apple Silicon. On Intel Macs, QEMU emulation adds ~2-3×.
+## 5. Host the deploy bundle
 
-## 5. IAM policy reference
-
-(Already applied automatically by `scripts/aws-setup.sh` in step 3. This reference exists for audit / the manual path in step 3a.)
-
-`borzoi-installer-policy.json`:
-
-```json
-{
-  "Version": "2012-10-17",
-  "Statement": [
-    {
-      "Sid": "GetAuthToken",
-      "Effect": "Allow",
-      "Action": "ecr:GetAuthorizationToken",
-      "Resource": "*"
-    },
-    {
-      "Sid": "PullBorzoiImages",
-      "Effect": "Allow",
-      "Action": [
-        "ecr:BatchGetImage",
-        "ecr:GetDownloadUrlForLayer",
-        "ecr:BatchCheckLayerAvailability"
-      ],
-      "Resource": [
-        "arn:aws:ecr:<region>:<account-id>:repository/borzoi-backend",
-        "arn:aws:ecr:<region>:<account-id>:repository/borzoi-frontend"
-      ]
-    }
-  ]
-}
-```
-
-Replace `<region>` and `<account-id>` with yours. **Save the access key ID and secret** — you'll hand these to every customer install.
-
-## 6. Prepare the deploy bundle repo
-
-Host `borzoi-deploy` somewhere reachable by customer Pis. Options:
-
-- **Public GitHub repo** — simplest. No secrets in the repo, just the compose file and setup scripts. Customers `git clone` directly.
-- **Private GitHub repo** — requires the Pi to auth. Not recommended unless you have a reason.
-- **S3-hosted tarball** — host a tarball of `borzoi-deploy` at a stable URL, skip git entirely. `install.sh` downloads and extracts.
-
-Update `install.sh` to point at wherever you host it:
+Customer Pis clone `borzoi-deploy`. A public repo is simplest — it contains no
+secrets, only the compose file and setup scripts.
 
 ```bash
 # In borzoi-deploy/install.sh
 BORZOI_DEPLOY_REPO="${BORZOI_DEPLOY_REPO:-https://github.com/borzoihub/borzoi-deploy.git}"
 ```
 
-## 7. Rotation cadence
+## 6. Credential rotation
 
-Plan to rotate the shared ECR installer credentials on a schedule (annual is reasonable). Rotation requires updating the `[borzoi-ecr]` profile on every customer Pi. Script it or document the SSH sequence.
+| Credential | Where | Rotating it |
+|---|---|---|
+| Hub connection key | per Hub, `VOLTINI_HUB_SECRET` | installer portal → **Byt nyckel**, then `set-hub-secret.sh` on the Pi. Per-Hub, safe on a live site. See [connection-key.md](connection-key.md). |
+| `GHCR_TOKEN` | shared, every Pi | regenerate on `voltini-autobot` and update every `.env`. This is the pain the connection key removes — retire it per Hub as each adopts a key. |
+| GitHub App key (registry brokering) | central only | regenerate in the App's settings; no Pi is touched. |
 
-App credentials (per-customer S3/SES) are rotated independently when an individual customer requires it — those rotations don't affect other customers.
+There are **no AWS credentials on any Pi** to rotate. The nightly backup fetches
+short-lived ones from central per run.

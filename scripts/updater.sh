@@ -27,6 +27,12 @@ set -uo pipefail
 INSTALL_DIR="${INSTALL_DIR:-$(pwd)}"
 cd "$INSTALL_DIR" || { echo "updater: cannot cd to $INSTALL_DIR" >&2; exit 1; }
 
+# Credential-broker client — supplies `registry_credential`, used by
+# registry_login() below. Sourced from the mounted project rather than baked
+# into the updater image so a `git_sync` picks up changes without an image roll.
+# shellcheck source=scripts/broker.sh
+source "$INSTALL_DIR/scripts/broker.sh"
+
 UPGRADE_DIR="$INSTALL_DIR/data/upgrade"
 CAPABLE="$UPGRADE_DIR/capable"
 REQUEST="$UPGRADE_DIR/request.json"
@@ -85,9 +91,11 @@ write_status() {
 # container's filesystem is ephemeral — a login written here does not survive a
 # recreate, unlike the host's ~/.docker/config.json.
 #
-# GHCR_TOKEN is a read:packages PAT from .env. When the central token broker
-# lands this becomes a fetch of a short-lived token; nothing else in this file
-# changes.
+# The credential comes from `registry_credential` (scripts/broker.sh): a
+# short-lived token brokered through central when this Hub has its central
+# secret, otherwise the static read:packages PAT from .env. This function is
+# the swap point the credential-broker blueprint identified, and swapping it is
+# all that changed — compose, the pull sequence and the OTA flow are untouched.
 registry_login() {
   LOGIN_ERR=""
   if [ -z "${REGISTRY:-}" ]; then
@@ -95,19 +103,25 @@ registry_login() {
     echo "updater: $LOGIN_ERR" >&2
     return 1
   fi
-  if [ -z "${GHCR_TOKEN:-}" ]; then
-    LOGIN_ERR="GHCR_TOKEN not set in .env"
+
+  # Not `$(registry_credential)` — that subshell would discard BROKER_ERR and
+  # REGISTRY_CRED_SOURCE, so a failure would be reported with no reason and the
+  # status file would say only "Registry login failed". See scripts/broker.sh.
+  if ! registry_credential; then
+    LOGIN_ERR="$BROKER_ERR"
     echo "updater: $LOGIN_ERR" >&2
     return 1
   fi
+
   # Registry host only — REGISTRY is "ghcr.io/borzoihub".
   local host out
   host="${REGISTRY%%/*}"
-  if ! out="$(printf '%s' "$GHCR_TOKEN" | docker login "$host" -u "${GHCR_USER:-voltini-autobot}" --password-stdin 2>&1)"; then
-    LOGIN_ERR="docker login $host: $out"
+  if ! out="$(printf '%s' "$REGISTRY_CREDENTIAL" | docker login "$host" -u "${GHCR_USER:-voltini-autobot}" --password-stdin 2>&1)"; then
+    LOGIN_ERR="docker login $host (${REGISTRY_CRED_SOURCE:-unknown} credential): $out"
     echo "updater: $LOGIN_ERR" >&2
     return 1
   fi
+  echo "updater: registry login OK (${REGISTRY_CRED_SOURCE} credential)"
 }
 
 run_upgrade() {

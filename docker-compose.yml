@@ -83,6 +83,66 @@ services:
       - ${INSTALL_DIR}:${INSTALL_DIR}
     networks: [borzoi]
 
+  # theworks-db-backup — nightly pg_dump shipped to the Voltini backup bucket
+  # under THIS Hub's own prefix. Same generic image every theworks product uses
+  # (source: theworks-tools/db-backup); it contains no Voltini code and needs
+  # none.
+  #
+  # ── Where the AWS credentials come from ─────────────────────────────
+  # Nowhere on this Pi. There is NO AWS key in .env. The two
+  # AWS_CONTAINER_* variables below are an **AWS-standard** mechanism: the AWS
+  # CLI inside the container fetches credentials from that URL itself, caches
+  # them, and refreshes them on expiry. That is why the image needs no change —
+  # it just runs `aws s3 cp` on the default credential chain, exactly as it does
+  # on central where the same two slots hold a static IAM key instead.
+  #
+  # Central authenticates the fetch with VOLTINI_HUB_SECRET and returns a
+  # session confined by policy to s3://<bucket>/<installation-id>/*, so a
+  # compromised Hub can write to its own prefix and nowhere else. Spec:
+  # voltini.energy-backend/docs/HUB_CREDENTIAL_BROKER.md
+  #
+  # The token is sent VERBATIM as the Authorization header (the SDK adds no
+  # "Bearer " itself), which central accepts with or without the scheme.
+  #
+  # Profile-gated: a Hub that has not been issued a central secret yet simply
+  # does not run this service, and keeps using the local-only
+  # scripts/db-backup.sh. Enable with COMPOSE_PROFILES=cloud-backup in .env.
+  db-backup:
+    image: ghcr.io/digistrada/theworks-db-backup:${DB_BACKUP_TAG:-latest}
+    container_name: borzoi-db-backup
+    profiles: ["cloud-backup"]
+    restart: unless-stopped
+    depends_on:
+      postgres: { condition: service_healthy }
+    environment:
+      DB_HOST: postgres
+      DB_PORT: "5432"
+      DB_USER: ${DB_USER}
+      DB_PASSWORD: ${DB_PASSWORD}
+      BACKUP_DATABASES: ${DB_NAME}
+      BACKUP_S3_BUCKET: ${BACKUP_S3_BUCKET}
+      # Every key this Hub writes lives under its own installation id — the
+      # prefix the brokered session policy pins it to. A mismatch here means
+      # every upload fails with AccessDenied, which is the correct failure.
+      BACKUP_S3_PREFIX: ${VOLTINI_INSTALLATION_ID}
+      BACKUP_SCHEDULE: ${BACKUP_SCHEDULE:-0 2 * * *}
+      BACKUP_RETENTION_DAYS: ${BACKUP_RETENTION_DAYS:-14}
+      AWS_CONTAINER_CREDENTIALS_FULL_URI: ${VOLTINI_BROKER_URL}/s3-backup
+      AWS_CONTAINER_AUTHORIZATION_TOKEN: ${VOLTINI_HUB_SECRET}
+      AWS_DEFAULT_REGION: ${BACKUP_AWS_REGION:-eu-north-1}
+    volumes:
+      - ./data/backups:/backups
+      # Everything under /host is tarred into a nightly secrets bundle, which
+      # is what makes a dead Pi recoverable — the .env and its generated
+      # secrets exist nowhere else. Note this now includes VOLTINI_HUB_SECRET
+      # itself, i.e. the credential that fetches the token used to upload the
+      # bundle. That is survivable (a restore is driven by an operator with
+      # their own credentials, and the secret is revocable from the portal),
+      # but it means a leaked bundle hands over this Hub's central credential
+      # as well as its database. Rotate the Hub secret after any restore.
+      - ./.env:/host/.env:ro
+    networks: [borzoi]
+
   frontend:
     image: ${REGISTRY}/borzoi-frontend:${FRONTEND_TAG:-latest}
     container_name: borzoi-frontend

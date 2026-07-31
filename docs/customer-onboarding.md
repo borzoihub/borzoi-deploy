@@ -1,43 +1,55 @@
 # Customer onboarding
 
-Per-install checklist for the operator. In today's product, the only AWS resource the Pi actually authenticates against is ECR — and the ECR pull credentials are shared across all customer installs (see [operator-setup.md § 5](operator-setup.md#5-create-the-shared-ecr-pull-iam-user)). So per-customer onboarding is light.
+Per-install checklist for the operator.
 
-## Why there's no per-customer IAM user today
+There is **no per-customer cloud account of any kind** — no IAM user, no bucket,
+no SES identity. A Hub holds exactly one credential for Voltini (its connection
+key) and exchanges it for whatever short-lived access it needs. Onboarding is
+correspondingly light.
 
-The backend has code paths for S3 (file uploads) and SES (account emails) but neither feature is used by the product. The install writes placeholder AWS credentials into `.env` to satisfy env-var validation — no actual AWS calls are made with them.
+## 1. Register the installation in the portal
 
-If/when S3 or SES features are wired in later, each customer will need an IAM user with policies scoped to their bucket + SES domain. That setup has been captured in the [Future: per-customer AWS setup](#future-per-customer-aws-setup) section below so the procedure isn't lost.
+Create the installation in the installer portal first — it assigns the numeric
+installation id that everything else keys off, including the S3 prefix its
+backups land under.
 
-## 1. Choose an installation ID
+## 2. Choose a hostname
 
-Pick a short, URL-safe identifier for this installation (e.g. `joakim`, `forsmark`, `acme`). The public hostname will be `<installation-id>.voltini.cloud`. See [cloudflare-tunnel.md](cloudflare-tunnel.md) for the naming convention and reserved subdomains.
+Pick a short, URL-safe identifier (e.g. `joakim`, `forsmark`, `acme`). The public
+hostname is `<installation-id>.voltini.cloud`. Naming convention and reserved
+subdomains: [cloudflare-tunnel.md](cloudflare-tunnel.md).
 
-## 2. Assemble the credentials packet
+## 3. Issue the connection key
 
-Text file to hand to the installer. Delete from your machine after delivery; keep only a secure copy in your password manager.
+Portal → the installation → **Nyckel** → *Skapa nyckel*. **It is shown once.**
+
+Full lifecycle — replacing it safely on a live site, blocking a leaked one:
+[connection-key.md](connection-key.md).
+
+## 4. Assemble the credentials packet
+
+A text file to hand to the installer. Delete it from your machine after
+delivery; keep a copy only in your password manager.
 
 ```
 ================================================================
-Borzoi installation credentials — KEEP SECRET
+Voltini installation credentials — KEEP SECRET
 ================================================================
 
 Customer:         Acme Heating
-Installation ID:  acme
+Installation ID:  42
 Public hostname:  acme.voltini.cloud
 Pi hardware:      Raspberry Pi 5, 8GB
 
-─── ECR pull credentials (shared installer — same for all sites) ───
-Paste this JSON block when setup.sh asks for it:
+─── Registry pull token (shared — same for every site) ───
+GHCR_USER=voltini-autobot
+GHCR_TOKEN=ghp_...
 
-{
-  "ecr_region":        "eu-north-1",
-  "ecr_registry":      "123456789012.dkr.ecr.eu-north-1.amazonaws.com",
-  "access_key_id":     "AKIA...",
-  "secret_access_key": "..."
-}
+─── Connection key (unique to THIS installation) ───
+vhs_42_...
 
 ─── Bootstrap admin ───
-Admin email:      admin@acme.example (or customer's own email)
+Admin email:      admin@acme.example (or the customer's own)
 (password is auto-generated during setup.sh and printed once)
 
 ─── Cloudflare Tunnel ───
@@ -45,115 +57,28 @@ Tunnel token:     <paste from Zero Trust dashboard>
 ================================================================
 ```
 
-## 3. Hand off
+## 5. Hand off
 
-Send the packet to the installer (or the customer if they're self-installing). They'll use it during the [installation](installation.md) step.
+The installer uses the packet during [installation](installation.md). Once the
+Pi is up, run `./scripts/set-hub-secret.sh` to install the connection key.
 
-## Revocation
+Confirm afterwards that the portal shows a time under **Senast använd** for that
+installation — that is how you know the Hub really picked the key up, rather than
+one merely having been created for it.
 
-If a Pi is stolen, decommissioned, or compromised:
+## If a Pi is stolen, decommissioned or compromised
 
-- **Single compromised install**: there's nothing customer-specific to revoke today beyond the bootstrap admin password (which is installation-specific anyway). Wipe the Pi and reinstall.
-- **Shared ECR installer compromised**: rotate the installer IAM user's credentials globally and push updates to every customer Pi (see [operator-setup.md § 7](operator-setup.md#7-rotation-cadence)).
+1. **Block its connection key** — portal → **Spärra nyckel**. Immediate, and it
+   affects no other site. That Hub can no longer pull images or upload backups.
+2. Wipe the Pi.
+3. Consider the `.env` compromised in full: it carries `JWT_SECRET`, the DB
+   password and the bootstrap admin password. None of them reach beyond that
+   Hub, but nothing about them expires on its own.
 
----
+Note the nightly backup bundle contains that same `.env`, so **rotate a Hub's
+key after restoring one onto new hardware**.
 
-## Future: per-customer AWS setup
-
-**Only perform these steps if/when the backend starts using S3 or SES in earnest.** Today they are skipped.
-
-### S3 bucket
-
-```bash
-CUSTOMER=acme-heating
-AWS_REGION=eu-north-1
-
-aws s3api create-bucket \
-  --bucket borzoi-$CUSTOMER \
-  --region $AWS_REGION \
-  --create-bucket-configuration LocationConstraint=$AWS_REGION
-
-aws s3api put-public-access-block \
-  --bucket borzoi-$CUSTOMER \
-  --public-access-block-configuration \
-    "BlockPublicAcls=true,IgnorePublicAcls=true,BlockPublicPolicy=true,RestrictPublicBuckets=true"
-```
-
-### SES sender verification
-
-Either domain or individual email address:
-
-```bash
-aws ses verify-domain-identity --domain customer.example
-# Customer adds the returned TXT record to DNS
-
-# or for a single address:
-aws ses verify-email-identity --email-address no-reply@customer.example
-```
-
-If the SES account is still in the sandbox, verify every recipient too, or request production access.
-
-### Per-customer IAM user
-
-```bash
-CUSTOMER=acme-heating
-
-aws iam create-user --user-name borzoi-app-$CUSTOMER
-
-aws iam put-user-policy \
-  --user-name borzoi-app-$CUSTOMER \
-  --policy-name borzoi-app \
-  --policy-document "$(cat <<EOF
-{
-  "Version": "2012-10-17",
-  "Statement": [
-    {
-      "Sid": "S3",
-      "Effect": "Allow",
-      "Action": ["s3:GetObject","s3:PutObject","s3:DeleteObject","s3:ListBucket"],
-      "Resource": [
-        "arn:aws:s3:::borzoi-$CUSTOMER",
-        "arn:aws:s3:::borzoi-$CUSTOMER/*"
-      ]
-    },
-    {
-      "Sid": "SES",
-      "Effect": "Allow",
-      "Action": "ses:SendEmail",
-      "Resource": "*"
-    }
-  ]
-}
-EOF
-)"
-
-aws iam create-access-key --user-name borzoi-app-$CUSTOMER
-```
-
-### Update `.env` on the Pi
-
-Replace the placeholder values:
-
-```bash
-cd /opt/borzoi
-# Edit .env:
-AWS_ACCESS_KEY_ID=AKIA...          # real app key
-AWS_SECRET_ACCESS_KEY=...
-S3_BUCKET=borzoi-acme-heating
-SES_SENDER=no-reply@acme.example
-
-docker compose restart backend
-```
-
-### Revocation (future)
-
-When the per-customer IAM user exists:
-
-```bash
-aws iam list-access-keys --user-name borzoi-app-$CUSTOMER
-aws iam delete-access-key --user-name borzoi-app-$CUSTOMER --access-key-id AKIA...
-aws iam delete-user-policy --user-name borzoi-app-$CUSTOMER --policy-name borzoi-app
-aws iam delete-user --user-name borzoi-app-$CUSTOMER
-```
-
-Other customers are unaffected.
+The shared `GHCR_TOKEN` is the one credential a single stolen Pi still exposes
+fleet-wide, since every Pi holds the same one. Once a Hub brokers its registry
+token through its connection key, blocking the key covers this too — which is
+the argument for retiring `GHCR_TOKEN` per Hub as each adopts a key.

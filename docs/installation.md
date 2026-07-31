@@ -14,11 +14,12 @@ End-to-end walkthrough from blank SD card to a working Borzoi login.
 - A monitor + keyboard for first boot, OR SSH pre-configured on the card
 
 **Credentials packet** (from [customer-onboarding.md](customer-onboarding.md)):
-- ECR pull credentials (shared across installs)
+- Registry pull token (`GHCR_USER` / `GHCR_TOKEN`, shared across installs)
+- Connection key for this installation (`vhs_<id>_…`)
 - Bootstrap admin email
 
 **Network**:
-- Outbound internet access (for ECR pulls, Cloudflare Tunnel connector)
+- Outbound internet access (image pulls from `ghcr.io`, Cloudflare Tunnel connector)
 - **No port forwarding required** — the stack binds to `127.0.0.1:8080`
   and is exposed publicly through a Cloudflare Tunnel (see [cloudflare-tunnel.md](cloudflare-tunnel.md))
 
@@ -76,18 +77,17 @@ docker compose version    # should print v2.x.x
 ## Step 5 — Install the supporting tools
 
 ```bash
-sudo apt install -y openssl git jq amazon-ecr-credential-helper awscli
+sudo apt install -y openssl git jq curl
 ```
 
 - `openssl` — secret generation
 - `git` — fetching borzoi-deploy
 - `jq` — merging docker config (optional but nice)
-- `amazon-ecr-credential-helper` — handles ECR token refresh transparently
-- `awscli` — optional, used by setup.sh to validate credentials and auto-derive the ECR registry URL
+- `curl` — used by `scripts/broker.sh` to fetch short-lived credentials from central
 
-**Note**: `amazon-ecr-credential-helper` is in Debian 12 (bookworm) and later. On older images, either:
-- Upgrade the OS (recommended)
-- Install from the GitHub release binary: https://github.com/awslabs/amazon-ecr-credential-helper/releases
+No AWS tooling is needed. Images come from `ghcr.io` via a plain `docker login`,
+and the nightly backup's AWS credentials are fetched at run time by the AWS CLI
+*inside* the backup container.
 
 ## Step 6 — Create the install directory
 
@@ -118,41 +118,27 @@ You'll be prompted for the following, in order:
 
 | Prompt | What to enter | From credentials packet |
 |---|---|---|
-| (multiline paste) installer credentials JSON | paste the JSON block from `aws-setup.sh`, end with Ctrl-D | yes |
+| `Registry pull token` | the `read:packages` PAT from the credentials packet | yes |
 | `Bootstrap admin email` | e.g. `admin@acme.example` | yes |
 | `Cloudflare Tunnel token` | paste either the full `sudo cloudflared service install <token>` line or just the `eyJ...` token — setup.sh extracts it either way. Leave empty to configure later. | yes or skip |
 
-The installer credentials JSON looks like:
+The registry token is the same for every site; the **connection key is not** and
+is installed separately in step 8b below.
 
-```json
-{
-  "ecr_region":        "eu-north-1",
-  "ecr_registry":      "123456789012.dkr.ecr.eu-north-1.amazonaws.com",
-  "access_key_id":     "AKIA...",
-  "secret_access_key": "..."
-}
-```
-
-The operator generates this once with `scripts/aws-setup.sh` and hands the same JSON to every customer install (same shared installer credentials for all sites).
-
-> **Note on AWS app credentials**: the backend has code paths for S3
-> (file uploads) and SES (account emails) but they are not used by the
-> product today. `setup.sh` writes placeholder values to `.env` to
-> satisfy the entrypoint's env-var check. If those features get wired
-> in later, edit `.env` with real AWS credentials and restart the
-> backend.
+> **There are no AWS credentials in `.env`.** The five `BORZOI_AWS_*` /
+> `S3_BUCKET` / `SES_SENDER` variables that older installs carried are gone —
+> the S3/SES code behind them was dead and has been removed. Stale lines in an
+> existing `.env` are ignored, so no host needs hand-editing to boot.
 
 What happens after the prompts:
 
-1. **Credential validation** — if `aws-cli` is installed, the ECR creds are tested with `sts get-caller-identity`. If validation fails, you can re-enter.
+1. **Registry login verified** — `docker login ghcr.io` with the supplied token. If it fails, you can re-enter.
 2. **Secret generation** — DB password (32 chars), JWT secret (48 chars), bootstrap admin password (24 chars) are auto-generated.
 3. **.env written** to `/opt/borzoi/.env`, mode 600.
 4. **Directories created** — `data/postgres`, `data/backups`, `nginx/templates`.
-5. **AWS profile installed** — ECR creds written to `~/.aws/credentials` under `[borzoi-ecr]`. Any existing AWS profiles are preserved.
-6. **ECR credential helper wired up** — a wrapper at `/usr/local/bin/docker-credential-borzoi-ecr-login` is installed (requires sudo), and `~/.docker/config.json` is configured to use it.
-7. **Images pulled** — `docker compose pull`.
-8. **Stack brought up** — `docker compose up -d`. Binds to `127.0.0.1:8080`.
-9. **Cloudflare Tunnel enrolled** (if a token was provided) — installs `cloudflared` via apt, runs `cloudflared service install <token>`, starts as a systemd service.
+5. **Images pulled** — `docker compose pull`.
+6. **Stack brought up** — `docker compose up -d`. Binds to `127.0.0.1:8080`.
+7. **Cloudflare Tunnel enrolled** (if a token was provided) — installs `cloudflared` via apt, runs `cloudflared service install <token>`, starts as a systemd service.
 
 At the end, the admin credentials are printed **once**:
 
@@ -166,6 +152,27 @@ Admin login (save this — shown only once):
 ```
 
 Copy this to a password manager immediately. It is not stored anywhere retrievable.
+
+## Step 8b — Install the connection key
+
+The one credential this Hub holds for Voltini. It is what lets the Hub fetch
+short-lived registry tokens and back up to Voltini's S3 bucket, so that no
+long-lived cloud credential has to live on this SD card.
+
+```bash
+cd /opt/borzoi
+./scripts/set-hub-secret.sh          # prompts, hidden input
+```
+
+Paste the `vhs_<id>_…` value from the credentials packet. The script validates
+it, writes `.env`, and confirms it against central — if the paste is wrong it
+restores the previous `.env` and nothing changes.
+
+Then confirm in the installer portal that the installation shows a time under
+**Senast använd**. That is how you know the Hub actually picked the key up.
+
+Full lifecycle — replacing the key safely on a live site, blocking a leaked one,
+and enabling nightly cloud backups: [connection-key.md](connection-key.md).
 
 ## Step 9 — First login
 

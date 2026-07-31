@@ -79,11 +79,6 @@ if ! docker compose version >/dev/null 2>&1; then
   exit 1
 fi
 
-HAS_AWS_CLI=0
-if command -v aws >/dev/null 2>&1; then
-  HAS_AWS_CLI=1
-fi
-
 cd "$(dirname "$0")"
 
 # ---------- filesystem expansion (SD card) ----------------------------------
@@ -269,18 +264,18 @@ else
   exit 1
 fi
 
-# ---- Application AWS credentials (S3 + SES) ----
-# The backend has code paths for S3 (file uploads) and SES (account
-# emails) but they are currently unused in the product. Placeholders
-# satisfy the entrypoint's env-var validation; the backend never
-# actually authenticates against AWS with these. When/if S3 or SES
-# features get wired into the product, edit .env with real creds and
-# restart the backend.
-AWS_REGION="${AWS_REGION:-eu-north-1}"
-AWS_ACCESS_KEY_ID="AKIA-unused-placeholder"
-AWS_SECRET_ACCESS_KEY="unused-placeholder-secret"
-S3_BUCKET="borzoi-unused"
-SES_SENDER="no-reply@$BORZOI_DOMAIN"
+# ---- No application AWS credentials ----
+# There used to be five here (BORZOI_AWS_REGION / _ACCESS_KEY_ID /
+# _SECRET_ACCESS_KEY / S3_BUCKET / SES_SENDER), written as
+# "AKIA-unused-placeholder" and friends purely to satisfy the backend
+# entrypoint's env-var gate. The S3/SES stack they described was removed from
+# the backend on 2026-07-31, so the gate is gone and so are they.
+#
+# A Hub now holds NO long-lived AWS credential. The one thing that genuinely
+# needs AWS — the nightly database backup — obtains short-lived, per-Hub STS
+# credentials from central's broker using VOLTINI_HUB_SECRET, scoped to this
+# installation's own S3 prefix. See scripts/broker.sh and
+# voltini.energy-backend/docs/HUB_CREDENTIAL_BROKER.md.
 
 BORZOI_ADMIN_EMAIL=$(ask "Bootstrap admin email" "")
 
@@ -334,32 +329,12 @@ if [ -n "${CLOUDFLARE_TUNNEL_TOKEN:-}" ]; then
   fi
 fi
 
-# ---------- optional AWS validation ----------------------------------------
-
-if [ "$HAS_AWS_CLI" = "1" ]; then
-  echo "" >&2
-  # App AWS creds are placeholders — skip validation. Re-enable if/when
-  # S3 or SES features become active in the product.
-  if false; then
-  info "Validating app AWS credentials..."
-  while :; do
-    if AWS_ACCESS_KEY_ID="$AWS_ACCESS_KEY_ID" \
-       AWS_SECRET_ACCESS_KEY="$AWS_SECRET_ACCESS_KEY" \
-       AWS_REGION="$AWS_REGION" \
-       aws sts get-caller-identity >/dev/null 2>&1; then
-      info "App AWS credentials OK."
-      break
-    fi
-    err "App AWS credential validation failed."
-    retry=$(ask "Re-enter app credentials? (yes/no)" "yes")
-    if [ "$retry" != "yes" ]; then exit 1; fi
-    AWS_ACCESS_KEY_ID=$(ask "App AWS Access Key ID" "$AWS_ACCESS_KEY_ID")
-    AWS_SECRET_ACCESS_KEY=$(ask_secret "App AWS Secret Access Key")
-  done
-  fi
-else
-  info "aws-cli not installed — skipping credential validation."
-fi
+# ---------- (no AWS credential validation) ----------------------------------
+# A block here used to validate the app's AWS credentials with
+# `aws sts get-caller-identity`. It had already been disabled behind `if false`
+# because the credentials were placeholders; both are gone now, along with the
+# credentials themselves. Brokered backup credentials are verified where they
+# are used, not here.
 
 # ---------- generate secrets ------------------------------------------------
 
@@ -382,9 +357,11 @@ GHCR_TOKEN=$GHCR_TOKEN
 BACKEND_TAG=latest
 FRONTEND_TAG=latest
 
-# OTA updater sidecar — needs the install dir and the operator's AWS dir as
-# absolute host paths (compose interpolates these; the updater mounts the
-# project at its real host path so relative bind mounts resolve correctly).
+# OTA updater sidecar — needs the install dir as an absolute host path
+# (compose interpolates it; the updater mounts the project at its real host
+# path so relative bind mounts resolve correctly). It used to need the
+# operator's ~/.aws directory too, for the ECR credential helper; that went
+# with the GHCR switch.
 INSTALL_DIR=$(pwd)
 
 # Public URL / domain
@@ -404,14 +381,6 @@ JWT_SECRET=$JWT_SECRET
 # Bootstrap admin (created on first boot only)
 BORZOI_ADMIN_EMAIL=$BORZOI_ADMIN_EMAIL
 BORZOI_ADMIN_PASSWORD=$BORZOI_ADMIN_PASSWORD
-
-# App AWS credentials (S3 + SES) — prefixed BORZOI_ to avoid colliding
-# with the standard AWS_* env vars used by the ECR credential helper.
-BORZOI_AWS_REGION=$AWS_REGION
-BORZOI_AWS_ACCESS_KEY_ID=$AWS_ACCESS_KEY_ID
-BORZOI_AWS_SECRET_ACCESS_KEY=$AWS_SECRET_ACCESS_KEY
-S3_BUCKET=$S3_BUCKET
-SES_SENDER=$SES_SENDER
 
 EOF
 chmod 600 .env

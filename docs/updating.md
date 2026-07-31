@@ -4,19 +4,19 @@ How new backend or frontend releases reach a customer Pi.
 
 ## Publish new images (operator)
 
-On your Mac:
+CI builds and publishes; you only tag.
 
 ```bash
 cd /path/to/borzoi-backend
-npm version patch   # or minor/major
-npm run docker:release
+npm version patch        # or minor/major
+git push --follow-tags   # CI builds multi-arch and pushes to ghcr.io
 
 cd /path/to/borzoi-frontend
 npm version patch
-npm run docker:release
+git push --follow-tags
 ```
 
-See [operator-setup.md § 4](operator-setup.md#4-publishing-images) for details.
+See [operator-setup.md § 3](operator-setup.md#3-publishing-images) for details.
 
 ## Pull and restart on the Pi
 
@@ -46,19 +46,21 @@ SSH. It runs through the **`updater` sidecar** container:
 ```
 portal → voltini-backend → (SSO) → borzoi-backend POST /api/installer/upgrade
        → writes data/upgrade/request.json
-updater sidecar (this Pi) → backup → ECR login → docker compose pull
+updater sidecar (this Pi) → backup → registry login → docker compose pull
        → docker compose up -d (runtime services only) → status.json
 portal polls GET /api/installer/upgrade-status until success/failed
 ```
 
 Details:
 - The sidecar is built locally from [`../updater/Dockerfile`](../updater/Dockerfile)
-  (docker CLI + compose + aws-cli) and runs [`../scripts/updater.sh`](../scripts/updater.sh).
+  (docker CLI + compose + curl) and runs [`../scripts/updater.sh`](../scripts/updater.sh).
   It is **never pushed to a registry**.
-- It authenticates to ECR itself (`aws ecr get-login-password` using the
-  `[borzoi-ecr]` profile under `HOST_AWS_DIR`), then pulls + recreates
-  **only the runtime services** (`postgres backend frontend nginx`) — it
-  **excludes itself** so it isn't recreated mid-upgrade.
+- It logs in to `ghcr.io` itself via `registry_credential` in
+  [`../scripts/broker.sh`](../scripts/broker.sh) — a short-lived token brokered
+  through central when this Hub has a connection key, otherwise the static
+  `GHCR_TOKEN`. It then pulls + recreates **only the runtime services**
+  (`postgres backend frontend nginx`), **excluding itself** so it isn't
+  recreated mid-upgrade.
 - Progress lives in `data/upgrade/status.json`, which is on a bind mount and
   therefore survives the backend container being recreated mid-upgrade. The
   sidecar touches `data/upgrade/capable` every loop; the backend reports
