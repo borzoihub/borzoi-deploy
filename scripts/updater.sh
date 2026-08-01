@@ -42,6 +42,25 @@ POLL_SECONDS="${UPDATER_POLL_SECONDS:-10}"
 OTA_SERVICES="${OTA_SERVICES:-postgres backend frontend nginx}"
 OTA_BACKUP="${OTA_BACKUP:-1}"
 
+# ── Self-reload ─────────────────────────────────────────────────────────────
+# This script is bind-mounted, so `git_sync` can replace it on disk — but a
+# running bash process keeps executing the copy it already opened, and the OTA
+# path deliberately never recreates this container (it has to survive to write
+# status.json). Without self-reload, shipping a new updater.sh needs someone to
+# SSH in and restart the sidecar, i.e. a site visit per Hub.
+#
+# So: remember our own mtime, and re-exec when it moves. Checked at the TOP of
+# the loop, where no upgrade can be in flight, and skipped while a request is
+# pending or claimed — a reload mid-upgrade would abandon a half-written
+# status.json and leave the portal waiting forever.
+#
+# `exec` replaces the process image outright, so there is no partially-executed
+# state to reason about, and git's write-temp-then-rename means we can never
+# read a half-written file.
+SELF="$INSTALL_DIR/scripts/updater.sh"
+self_mtime() { stat -c '%Y' "$SELF" 2>/dev/null || echo 0; }
+SELF_MTIME="$(self_mtime)"
+
 mkdir -p "$UPGRADE_DIR"
 
 # .env carries REGISTRY + GHCR_TOKEN (+ DB_USER / DB_NAME for the backup script).
@@ -79,6 +98,38 @@ write_status() {
     printf '}'
   } > "$STATUS.tmp"
   mv "$STATUS.tmp" "$STATUS"
+}
+
+# Pull this bundle from git. Images come from the registry; docker-compose.yml,
+# the nginx templates, scripts/ and any mounted config.json do not — they are
+# files in this checkout, so without this an OTA upgrade ships new images and no
+# infrastructure changes at all.
+#
+# Runs as the checkout's owner, not root: this container is root, and a root
+# `git pull` would rewrite .git object ownership under the operator's directory,
+# so the next `git` command run over SSH fails with "dubious ownership".
+#
+# Non-fatal by design — `--ff-only` refuses on a diverged or hand-edited tree,
+# and a customer who once edited docker-compose.yml must not thereby lose the
+# ability to receive backend upgrades.
+#
+# This function was deleted by 173ceaa ("Switched ECR to GHCR") while its call
+# site in run_upgrade survived. `set -uo pipefail` carries no `-e`, so every OTA
+# upgrade since then logged `git_sync: command not found` and carried on — the
+# bundle silently stopped syncing on the whole fleet. Restored 2026-08-01.
+git_sync() {
+  [ -d "$INSTALL_DIR/.git" ] || { echo "updater: $INSTALL_DIR is not a git checkout — skipping sync."; return 0; }
+
+  local uid gid
+  uid="$(stat -c '%u' "$INSTALL_DIR")"
+  gid="$(stat -c '%g' "$INSTALL_DIR")"
+
+  if setpriv --reuid="$uid" --regid="$gid" --clear-groups \
+       env HOME=/tmp git -C "$INSTALL_DIR" pull --ff-only; then
+    echo "updater: bundle synced from git."
+  else
+    echo "updater: git pull --ff-only failed (diverged or dirty tree?) — continuing with on-disk files." >&2
+  fi
 }
 
 # Authenticate to the image registry. Runs on every upgrade because this
@@ -191,6 +242,16 @@ echo "updater: watching $REQUEST (poll ${POLL_SECONDS}s, install dir $INSTALL_DI
 while true; do
   # Heartbeat the capability marker so the backend reports otaSupported.
   touch "$CAPABLE" 2>/dev/null || true
+
+  # Pick up a newer copy of ourselves, but never while an upgrade is pending or
+  # in progress — see the SELF_MTIME note above.
+  if [ ! -f "$REQUEST" ] && [ ! -f "$REQUEST.processing" ]; then
+    now_mtime="$(self_mtime)"
+    if [ "$now_mtime" != "$SELF_MTIME" ] && [ "$now_mtime" != "0" ]; then
+      echo "updater: updater.sh changed on disk — re-executing to pick it up"
+      exec bash "$SELF"
+    fi
+  fi
 
   if [ -f "$REQUEST" ]; then
     # Claim the request atomically so a duplicate write can't double-run it.

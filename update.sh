@@ -198,6 +198,16 @@ docker compose up -d
 info "Restarting nginx to pick up template changes..."
 docker compose restart nginx
 
+# Same reasoning, and the one nobody notices: scripts/updater.sh is bind-mounted
+# into the sidecar, so editing it changes neither the image nor the compose
+# config and `up -d` leaves the old script running. Without this, a bundle sync
+# that ships a new updater has no effect until someone restarts the container by
+# hand — and since the OTA path deliberately excludes the updater from its own
+# recreate (it must survive to write status.json), THIS is the only place an
+# updated updater ever takes effect.
+info "Restarting updater to pick up script changes..."
+docker compose restart updater
+
 # Clean up old images to prevent disk from filling up
 info "Pruning unused Docker images..."
 docker image prune -af
