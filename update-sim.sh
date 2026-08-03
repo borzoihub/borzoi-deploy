@@ -146,4 +146,15 @@ fi
 info "Pruning unused Docker images..."
 docker image prune -af >/dev/null 2>&1 || true
 
+# `prune -a` won't delete an in-use image, but on a multi-tag image it DOES
+# remove the redundant tag first — and that is the very tag the container was
+# created from (the retag above). `docker ps` then can't resolve the container's
+# image reference and falls back to printing a bare image id, which defeats the
+# whole point of the retag. Re-apply it: docker resolves the reference at
+# display time, so the name comes back with no restart or recreate.
+if [ -n "${BACKEND_VER:-}" ]; then
+  docker tag "$REGISTRY/borzoi-backend:latest" \
+    "$REGISTRY/borzoi-backend:$BACKEND_VER" 2>/dev/null || true
+fi
+
 info "Sim update complete (now on ${BACKEND_VER:-latest})."
