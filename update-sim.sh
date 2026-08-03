@@ -61,8 +61,8 @@ dc() { docker compose -f "$COMPOSE_FILE_SIM" "$@"; }
 
 # ---------- registry credential ----------------------------------------------
 
-# GHCR needs an explicit `docker login`. Unlike the old ECR credential helper
-# there is no token exchange — GHCR_TOKEN is a read:packages PAT read from
+# GHCR needs an explicit `docker login` — there is no token exchange and no
+# credential helper. GHCR_TOKEN is a plain read:packages classic PAT read from
 # .env. Logging in each run is cheap and idempotent, and keeps a host that was
 # restored from backup (or whose ~/.docker was cleared) working without a
 # manual step.

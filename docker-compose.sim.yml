@@ -8,8 +8,8 @@ name: borzoi-sim
 # it reaches the coordinator (voltini.energy-backend) over outbound HTTPS only.
 #
 # OTA is identical to the full Hub FROM data/upgrade/request.json ONWARD —
-# same updater sidecar, same request.json/status.json/capable files, same ECR
-# pull + restart. Only the *trigger* differs: instead of an inbound
+# same updater sidecar, same request.json/status.json/capable files, same
+# registry pull + restart. Only the *trigger* differs: instead of an inbound
 # /api/installer/upgrade call (which the Hub gets via its Cloudflare Tunnel),
 # the sim node writes request.json itself when it claims an `update` job from
 # the queue and has drained its in-flight work.

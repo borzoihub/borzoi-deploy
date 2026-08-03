@@ -113,8 +113,8 @@ write_status() {
 # and a customer who once edited docker-compose.yml must not thereby lose the
 # ability to receive backend upgrades.
 #
-# This function was deleted by 173ceaa ("Switched ECR to GHCR") while its call
-# site in run_upgrade survived. `set -uo pipefail` carries no `-e`, so every OTA
+# This function was deleted by the registry-migration commit 173ceaa while its
+# call site in run_upgrade survived. `set -uo pipefail` carries no `-e`, so every OTA
 # upgrade since then logged `git_sync: command not found` and carried on — the
 # bundle silently stopped syncing on the whole fleet. Restored 2026-08-01.
 git_sync() {

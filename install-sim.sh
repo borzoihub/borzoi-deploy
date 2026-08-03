@@ -11,14 +11,14 @@ set -euo pipefail
 #
 # A "sim node" is the borzoi-backend image run in BORZOI_MODE=sim — a pure
 # outbound job-queue worker (see borzoi-backend/src/sim-server.ts). It pulls
-# the prebuilt multi-arch image from ECR (no local build), reaches the central
+# the prebuilt multi-arch image from GHCR (no local build), reaches the central
 # coordinator (voltini.energy-backend) over outbound HTTPS only, and updates
 # itself OTA via the same updater sidecar the full Hub uses — triggered by an
 # `update` job on the queue rather than an inbound call (no tunnel needed).
 #
 # Unlike the full Hub setup.sh this installs NO postgres/frontend/nginx, no
 # DB-backup cron, and no Cloudflare tunnel. It only:
-#   - parses the pasted sim bundle (ECR creds + coordinator URL + worker token)
+#   - parses the pasted sim bundle (GHCR pull creds + coordinator URL + worker token)
 #   - writes .env (mode 0600) pinned to docker-compose.sim.yml
 #   - logs docker in to the image registry (read-only token)
 #   - pulls the sim image and brings the sim + updater containers up
@@ -262,12 +262,13 @@ mkdir -p data/upgrade
 
 # ---------- registry auth ---------------------------------------------------
 # The `docker login` in the credential-validation step above already wrote
-# ~/.docker/config.json. No credential helper, no ~/.aws profile.
+# ~/.docker/config.json, which persists across reboots. GHCR takes a plain
+# bearer token, so that file is the whole of the node's registry auth.
 
 # ---------- pull + up ------------------------------------------------------
 # Explicit -f here (the updater's own bare calls rely on COMPOSE_FILE in .env).
 
-info "Pulling sim image from ECR..."
+info "Pulling sim image from ${REGISTRY%%/*}..."
 docker compose -f "$COMPOSE_FILE_SIM" pull sim
 
 info "Bringing the sim node up..."

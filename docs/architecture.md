@@ -111,8 +111,9 @@ Outside `/opt/borzoi`:
 
 - `~/.docker/config.json` — the `ghcr.io` login written by `docker login`
 
-There is no `~/.aws` and no credential-helper binary. No source code, no
-developer tokens and no personal GitHub accounts are ever on the Pi.
+That file is the whole of the Pi's registry auth — no credential-helper binary
+is installed. No source code, no developer tokens and no personal GitHub
+accounts are ever on the Pi.
 
 ## Backend boot sequence
 

@@ -4,8 +4,11 @@ Work you do **once**, before any customer installation.
 
 Images live in **GitHub Container Registry** (`ghcr.io/borzoihub`) and are built
 and published by each repo's GitHub Actions workflow. You do not build or push
-images by hand, and there is **no AWS in this path at all** — no ECR, no
-registry IAM user, no per-customer IAM user.
+images by hand. Image distribution is **entirely a GitHub concern** — a single
+GitHub machine account and its pull token, no registry IAM user and nothing
+per-customer. (AWS still appears elsewhere on a Hub, for the nightly database
+backup, but never for pulling images — see
+[connection-key.md](connection-key.md).)
 
 ## Prerequisites
 

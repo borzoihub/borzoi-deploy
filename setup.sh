@@ -359,9 +359,8 @@ FRONTEND_TAG=latest
 
 # OTA updater sidecar — needs the install dir as an absolute host path
 # (compose interpolates it; the updater mounts the project at its real host
-# path so relative bind mounts resolve correctly). It used to need the
-# operator's ~/.aws directory too, for the ECR credential helper; that went
-# with the GHCR switch.
+# path so relative bind mounts resolve correctly). Nothing else is mounted in:
+# the updater authenticates to the registry with GHCR_TOKEN from this .env.
 INSTALL_DIR=$(pwd)
 
 # Public URL / domain
@@ -414,9 +413,9 @@ mkdir -p data/postgres data/backups data/upgrade nginx/templates
 
 # ---------- registry auth ---------------------------------------------------
 # Nothing to do here. The `docker login` during the credential prompt above
-# wrote ~/.docker/config.json, which persists across reboots. There is no
-# credential helper, no ~/.aws profile and no wrapper script any more — GHCR
-# takes a plain bearer token.
+# wrote ~/.docker/config.json, which persists across reboots. GHCR takes a
+# plain bearer token, so there is no credential helper and no wrapper script —
+# that file is the whole of the Hub's registry auth.
 
 # ---------- pull + up ------------------------------------------------------
 

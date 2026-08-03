@@ -6,9 +6,9 @@ set -euo pipefail
 # latest published version in the registry. Read-only; run on the sim node itself.
 #
 # "Local" is read straight from the running `borzoi-sim` container. "Latest" is
-# the version inside the published `latest` image, resolved by pulling it when
-# available (no image pull), otherwise resolved by pulling `latest` and reading
-# its package.json (the docker credential helper handles auth either way).
+# the version inside the published `latest` image, resolved by pulling it and
+# reading its package.json. Auth comes from the `ghcr.io` entry that
+# setup.sh/install-sim.sh wrote to ~/.docker/config.json.
 #
 # Usage: ./checksimver.sh
 # ============================================================================
@@ -41,11 +41,10 @@ LOCAL_VER="$(docker exec borzoi-sim node -p "require('./package.json').version" 
 
 # ---------- latest published version ----------------------------------------
 
-# The old ECR path used `aws ecr describe-images` to read the semver tag riding
-# on `latest` without pulling. GHCR has no equivalent one-liner that works with
-# a read:packages token, so we simply pull and read the version out of the
-# image — which is what the ECR path fell back to anyway, and is authoritative
-# rather than inferred from tags.
+# GHCR has no one-liner that reads the semver tag riding on `latest` using only
+# a read:packages token, so we pull and read the version out of the image
+# itself. That is authoritative rather than inferred from tags, which is what we
+# want anyway — the tag can lie, `package.json` in the image cannot.
 echo "Resolving latest published version..."
 docker compose -f "$COMPOSE_FILE_SIM" pull sim >/dev/null 2>&1 || true
 LATEST_VER="$(docker run --rm --entrypoint node \
