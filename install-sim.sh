@@ -38,6 +38,13 @@ require_cmd() {
   fi
 }
 
+# Generate a URL-safe secret of length $1. Same helper as the Hub's setup.sh —
+# openssl base64 can include =+/, so strip those and newlines, then truncate.
+gen_secret() {
+  local len="$1"
+  openssl rand -base64 $((len * 2)) | tr -d '\n=+/' | cut -c1-"$len"
+}
+
 # ask "prompt" "default" — returns value on stdout.
 ask() {
   local prompt="$1"
@@ -90,6 +97,7 @@ extract_json_field() {
 # Hub setup.sh — we do not auto-install Docker).
 
 require_cmd docker
+require_cmd openssl
 if ! docker compose version >/dev/null 2>&1; then
   err "docker compose v2 not available (need the 'docker compose' plugin, not docker-compose v1)."
   err "Install Docker Engine + the compose plugin, then re-run ./install-sim.sh"
@@ -251,6 +259,18 @@ COORDINATOR_URL=$COORDINATOR_URL
 JOB_AUTH_TOKEN=$JOB_AUTH_TOKEN
 JOB_NODE_ID=$JOB_NODE_ID
 JOB_MAX_CONCURRENT=$JOB_MAX_CONCURRENT
+
+# Host loopback port for the fleet ops routes (/api/health, /api/version).
+# Change it if 3400 is already taken on this machine — the container listens on
+# the same value, so both sides of the published mapping move together.
+SIM_PORT=3400
+
+# Bearer for GET /api/ops/metrics (queue occupancy, last run per capability,
+# coordinator reachability). The fleet agent reads it from THIS file, so both
+# ends stay in step with nothing to paste. A full Hub derives it from
+# JWT_SECRET; a sim node has no JWT_SECRET, so it carries an explicit one —
+# without it the route answers 503 and the node's fleet card shows no metrics.
+OPS_TOKEN=$(gen_secret 48)
 EOF
 chmod 600 .env
 info ".env written (mode 600)."

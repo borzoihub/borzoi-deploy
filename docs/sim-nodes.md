@@ -183,8 +183,45 @@ docker buildx imagetools inspect <registry>/borzoi-backend:latest
 
 ---
 
+## Fleet ops routes
+
+The sim container publishes `127.0.0.1:${SIM_PORT:-3400}` — **loopback only**, so
+nothing outside the machine can reach it. It serves the same ops contract every
+theworks backend serves, for the fleet agent that runs on the same host:
+
+| Route | Answers |
+| --- | --- |
+| `GET /api/health` | liveness — status, uptime, start time |
+| `GET /api/version` | the version this container is running |
+| `GET /api/ops/metrics` | queue occupancy (`running / capacity`, completed and failed totals, last claim), one row per registered capability with its last run's outcome, and the coordinator's reachability. Bearer-gated by `OPS_TOKEN`. |
+
+There is no `/api/health/ready`: readiness means "can it serve requests", and a
+node with no database and no inbound API cannot answer that with anything but a
+fabricated *yes*. The fleet renders the absence as *readiness — no route*.
+
+**3400, not 3100.** A sim node is often co-located with another theworks stack,
+and central already binds `127.0.0.1:3100`, `:3200` and `:3300` on its host.
+Set `SIM_PORT` in `.env` if 3400 is taken too — the container listens on the
+same variable, so both sides of the mapping move together.
+
+### Nodes installed before this existed
+
+`install-sim.sh` writes `OPS_TOKEN` into `.env`. A node installed before that
+has none, and `/api/ops/metrics` answers `503 ops token not configured` — health
+and version still work, but the fleet card shows no metrics. To fix one:
+
+```bash
+cd ~/borzoi-deploy
+echo "OPS_TOKEN=$(openssl rand -base64 96 | tr -d '\n=+/' | cut -c1-48)" >> .env
+docker compose -f docker-compose.sim.yml up -d --force-recreate sim
+```
+
+The fleet agent reads the same `.env`, so there is nothing to paste anywhere
+else.
+
 ## What a sim node does *not* run
 
 No `postgres`, `frontend`, or `nginx`; no DB-backup cron; no Cloudflare Tunnel.
-It opens no inbound ports — all communication is outbound to the coordinator.
-The only local surface is `/healthz`, used by the container healthcheck.
+It accepts no inbound traffic from outside the machine — all communication with
+the coordinator is outbound. The only local surface is the loopback ops routes
+above.

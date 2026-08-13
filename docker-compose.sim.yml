@@ -27,6 +27,10 @@ services:
     environment:
       # Selects src/sim-server.ts in docker-entrypoint.sh (job-queue worker).
       BORZOI_MODE: sim
+      # Must be the SAME default as the published port below — sim-server.ts
+      # falls back to 3100 on its own, so publishing 3400:3400 without this
+      # would map to a container port nothing listens on.
+      SIM_PORT: ${SIM_PORT:-3400}
     volumes:
       # Shared OTA-upgrade channel with the updater sidecar: the sim node
       # writes request.json (after it has drained on an `update` job) and a
@@ -35,8 +39,16 @@ services:
     # Published to host loopback ONLY, so the fleet agent can read the node's
     # ops routes the same way it reads every other backend on a host. Nothing
     # inbound depends on this: work still arrives over the outbound job queue.
+    #
+    # 3400, NOT the backend's own default of 3100: a sim node is often
+    # co-located with another theworks stack, and central already binds
+    # 127.0.0.1:3100 (backend), :3200 (cases-be) and :3300 (cases-fe) on its
+    # host. Defaulting to 3100 made `up -d sim` fail there with "port is
+    # already allocated". Override SIM_PORT in .env if 3400 is taken too — the
+    # sim server reads the same variable for its listen port, so both sides of
+    # the mapping move together.
     ports:
-      - "127.0.0.1:${SIM_PORT:-3100}:${SIM_PORT:-3100}"
+      - "127.0.0.1:${SIM_PORT:-3400}:${SIM_PORT:-3400}"
     healthcheck:
       # Liveness only — the node is reached via the outbound job queue, not here.
       # `/api/health` is the fleet-wide shape (theworks-be's ops router); it
