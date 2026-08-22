@@ -85,6 +85,20 @@ services:
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
       - ${INSTALL_DIR}:${INSTALL_DIR}
+    healthcheck:
+      # The loop touches data/upgrade/capable at the top of every 10s
+      # iteration (updater.sh) — a stale mtime means the loop is dead or hung.
+      # 15 min threshold: an in-flight upgrade (pull + up -d) blocks the touch
+      # for its whole run, and that must not read as unhealthy.
+      test:
+        [
+          "CMD-SHELL",
+          "test $$(( $$(date +%s) - $$(stat -c %Y data/upgrade/capable 2>/dev/null || echo 0) )) -lt 900",
+        ]
+      interval: 60s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
     networks: [borzoi-sim]
 
 networks:
