@@ -124,22 +124,52 @@ fi
 # WiFi power save causes the Pi to miss inbound packets (ARP, TCP) when
 # idle, making the Cloudflare tunnel and LAN access unreliable. Disable it
 # permanently via NetworkManager (default on Raspbian Bookworm+).
+#
+# It also breaks OTA image pulls, which is how it was found. TCP rides out a
+# sleeping radio by retransmitting; a DNS query is one UDP datagram with no
+# transport-level retry, so it is the first thing dropped. A Hub therefore
+# keeps answering health checks and running its nightly backup while every
+# `docker compose pull` dies partway through with a resolver error.
 
 if command -v nmcli >/dev/null 2>&1; then
-  WIFI_CON=$(nmcli -t -f NAME,TYPE connection show | awk -F: '$2=="802-11-wireless"{print $1; exit}')
-  if [ -n "$WIFI_CON" ]; then
-    CURRENT_PS=$(nmcli -t -f 802-11-wireless.powersave connection show "$WIFI_CON" 2>/dev/null | cut -d: -f2)
+  WIFI_FOUND=0
+  # EVERY wireless profile, not just the first. A Pi that carries a
+  # preconfigured profile alongside the customer's own would otherwise have
+  # power save disabled on whichever sorted first, which need not be the one
+  # that is up. Read line-by-line so names with spaces survive, as in the DNS
+  # loop below.
+  while IFS=: read -r conn type; do
+    [ "$type" = "802-11-wireless" ] || continue
+    WIFI_FOUND=1
+    CURRENT_PS=$(nmcli -t -f 802-11-wireless.powersave connection show "$conn" 2>/dev/null | cut -d: -f2)
     if [ "$CURRENT_PS" != "2" ]; then
-      info "Disabling WiFi power save for connection '$WIFI_CON'..."
-      sudo nmcli connection modify "$WIFI_CON" 802-11-wireless.powersave 2
-      sudo nmcli connection down "$WIFI_CON" && sudo nmcli connection up "$WIFI_CON"
-      info "WiFi power save disabled."
+      info "Disabling WiFi power save for connection '$conn'..."
+      sudo nmcli connection modify "$conn" 802-11-wireless.powersave 2
     else
-      info "WiFi power save already disabled."
+      info "WiFi power save already disabled on '$conn'."
     fi
-  else
+
+    # The profile setting only takes effect on re-association, and a down/up
+    # here drops the operator's SSH session mid-install. Set it on the live
+    # radio instead — same reasoning as `device reapply` in the DNS block.
+    DEV=$(nmcli -t -f NAME,DEVICE connection show --active 2>/dev/null | \
+      awk -F: -v c="$conn" '$1==c{print $2; exit}')
+    [ -n "$DEV" ] || continue
+    sudo iw dev "$DEV" set power_save off 2>/dev/null || true
+
+    # Verify, because the failure this block prevents is silent: a profile
+    # reading 2 while the radio reads "on" looks configured and still stalls
+    # every image pull.
+    if iw dev "$DEV" get power_save 2>/dev/null | grep -q "on"; then
+      err "WiFi power save is STILL ON for $DEV — OTA image pulls will be unreliable."
+      err "Resolve before handing this Hub over: iw dev $DEV get power_save"
+    else
+      info "WiFi power save off on $DEV."
+    fi
+  done < <(nmcli -t -f NAME,TYPE connection show)
+
+  [ "$WIFI_FOUND" = "1" ] || \
     info "No WiFi connection found in NetworkManager — skipping power-save config."
-  fi
 else
   # Fallback: create a systemd oneshot that disables power save at boot.
   if iw wlan0 get power_save 2>/dev/null | grep -q "on"; then
