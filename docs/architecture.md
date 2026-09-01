@@ -86,7 +86,7 @@ the connection key. That is impossible: GHCR accepts a classic PAT or an Actions
 [connection-key.md](connection-key.md).
 
 Leaking it lets an attacker pull the images. Note that the backend image
-contains **`src/` — the full TypeScript source** (kept so the migrate one-shot
+contains **`src/` — the full TypeScript source** (kept so the migration step
 can run under `tsx`), so this is source disclosure, not just binaries. It
 carries no credentials: the `.npmrc` is a BuildKit secret removed in the same
 layer, `.env` is excluded by `.dockerignore`, and no config file is baked in.

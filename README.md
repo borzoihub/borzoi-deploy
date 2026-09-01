@@ -92,7 +92,7 @@ docker compose pull
 docker compose up -d
 ```
 
-The `migrate` one-shot runs before the backend, so schema upgrades are
+The backend runs schema migrations on boot, so schema upgrades are
 applied automatically. The `frontend` one-shot refreshes the static
 files in the shared nginx volume.
 
@@ -244,12 +244,11 @@ docker compose up -d frontend   # re-run the one-shot
 
 ### Migrations fail to run
 
-Check `docker compose logs migrate`. Most common cause: DB not yet
-healthy at the time migrate was scheduled (should be prevented by the
+Check `docker compose logs backend`. Most common cause: DB not yet
+healthy at the time the backend was scheduled (should be prevented by the
 `service_healthy` depends_on, but a very slow first boot on a Pi can
 still cause issues). Retry:
 
 ```bash
-docker compose up -d migrate
 docker compose up -d backend
 ```
