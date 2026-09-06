@@ -133,7 +133,7 @@ For the legacy direct-internet setup (not recommended), see [docs/tls.md](docs/t
 ## Backup
 
 The stateful data lives in two places: the postgres data volume and
-the `.env` file (contains DB password, JWT secret, AWS creds, admin
+the `.env` file (contains DB password, JWT secret, admin
 password). Back up both:
 
 ```bash
