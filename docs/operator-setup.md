@@ -28,10 +28,11 @@ watching.
 This token is what `setup.sh` asks for, and it goes into `GHCR_TOKEN` in each
 Pi's `.env`.
 
-> **It is transitional.** A shared token has no per-Hub revocation, and rotating
-> it means touching every Pi. Once a Hub has its own connection key, the update
-> scripts broker a short-lived token instead and this one becomes a fallback —
-> see [connection-key.md](connection-key.md). With two Hubs in the operator's
+> **It is permanent.** A shared token has no per-Hub revocation, and rotating
+> it means touching every Pi. The connection key does **not** broker a registry
+> token in its place: GHCR accepts only a classic PAT or an Actions
+> `GITHUB_TOKEN`, so there is no brokered credential to move to — see
+> [connection-key.md](connection-key.md). With two Hubs in the operator's
 > own home it is proportionate; it stops being proportionate once the fleet is
 > in customers' houses.
 
@@ -95,8 +96,7 @@ BORZOI_DEPLOY_REPO="${BORZOI_DEPLOY_REPO:-https://github.com/borzoihub/borzoi-de
 | Credential | Where | Rotating it |
 |---|---|---|
 | Hub connection key | per Hub, `VOLTINI_HUB_SECRET` | installer portal → **Byt nyckel**, then `set-hub-secret.sh` on the Pi. Per-Hub, safe on a live site. See [connection-key.md](connection-key.md). |
-| `GHCR_TOKEN` | shared, every Pi | regenerate on `voltini-autobot` and update every `.env`. This is the pain the connection key removes — retire it per Hub as each adopts a key. |
-| GitHub App key (registry brokering) | central only | regenerate in the App's settings; no Pi is touched. |
+| `GHCR_TOKEN` | shared, every Pi | regenerate on `voltini-autobot` and update every `.env`. |
 
 There are **no AWS credentials on any Pi** to rotate. The nightly backup fetches
 short-lived ones from central per run.

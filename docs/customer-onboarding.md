@@ -69,7 +69,7 @@ one merely having been created for it.
 ## If a Pi is stolen, decommissioned or compromised
 
 1. **Block its connection key** — portal → **Spärra nyckel**. Immediate, and it
-   affects no other site. That Hub can no longer pull images or upload backups.
+   affects no other site. That Hub can no longer upload backups.
 2. Wipe the Pi.
 3. Consider the `.env` compromised in full: it carries `JWT_SECRET`, the DB
    password and the bootstrap admin password. None of them reach beyond that

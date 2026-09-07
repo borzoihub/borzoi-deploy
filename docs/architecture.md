@@ -8,7 +8,7 @@
 │  ┌─────────┐   ┌──────────┐   ┌──────────┐   ┌─────────────────┐    │
 │  │  nginx  │──▶│ backend  │──▶│ postgres │   │    frontend     │    │
 │  │  :80    │   │  :3100   │   │  :5432   │   │  (one-shot)     │    │
-│  │  :443   │   │          │   │ timescale│   │  copies static  │    │
+│  │         │   │          │   │ timescale│   │  copies static  │    │
 │  └────┬────┘   └──────────┘   └──────────┘   │  → shared vol   │    │
 │       │                                       └────────┬────────┘    │
 │       │  serves static files from shared volume        │             │
@@ -21,7 +21,7 @@
                             ▲
                             │
                   registry pull token
-                (brokered, or shared PAT)
+                       (shared PAT)
                             │
                             ▼
                      ┌─────────────┐
