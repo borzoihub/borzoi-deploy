@@ -6,7 +6,7 @@ host — typically a Raspberry Pi 4 or 5 in a customer's home. Images are
 pulled from GitHub Container Registry (`ghcr.io/borzoihub`). No source code,
 no developer credentials and **no long-lived cloud credential** live on the
 device: the Hub holds one connection key for Voltini central and exchanges it
-per use for short-lived registry and backup access
+per use for short-lived backup access
 (see [`docs/connection-key.md`](docs/connection-key.md)).
 
 Full operator/installer documentation lives in [`docs/`](docs/README.md) and

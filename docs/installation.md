@@ -155,9 +155,9 @@ Copy this to a password manager immediately. It is not stored anywhere retrievab
 
 ## Step 8b — Install the connection key
 
-The one credential this Hub holds for Voltini. It is what lets the Hub fetch
-short-lived registry tokens and back up to Voltini's S3 bucket, so that no
-long-lived cloud credential has to live on this SD card.
+The one credential this Hub holds for Voltini. It is what lets the Hub back up
+to Voltini's S3 bucket, so that no long-lived cloud credential has to live on
+this SD card.
 
 ```bash
 cd /opt/borzoi
