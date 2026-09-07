@@ -4,6 +4,17 @@ server {
 
     client_max_body_size 25m;
 
+    # Defence-in-depth response headers (safe, behaviour-preserving hardening).
+    # `always` so they are emitted on error responses too. Note: nginx only
+    # inherits server-level add_header into a location that has NO add_header of
+    # its own — none of the locations below set any, so these apply everywhere.
+    # CSP and HSTS are deliberately NOT set here — see SECURITY_FINDINGS.md
+    # (CSP risks breaking the Angular admin UI; HSTS would break plain-HTTP LAN
+    # access to the Hub). Those are human decisions.
+    add_header X-Content-Type-Options "nosniff" always;
+    add_header X-Frame-Options "SAMEORIGIN" always;
+    add_header Referrer-Policy "strict-origin-when-cross-origin" always;
+
     location /api/ {
         proxy_pass         http://backend:3100/api/;
         proxy_http_version 1.1;
