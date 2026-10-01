@@ -37,7 +37,7 @@
 | `postgres` | `timescale/timescaledb:2.17.2-pg16` | Storage (entities + TimescaleDB hypertables) | `unless-stopped` |
 | `backend` | `${REGISTRY}/borzoi-backend:...` | Node.js API on :3100, runs migrations + bootstrap-admin at startup | `unless-stopped` |
 | `frontend` | `${REGISTRY}/borzoi-frontend:...` | One-shot: copies compiled Angular output into the shared `frontend-static` volume, exits 0 | `no` |
-| `nginx` | `nginx:1.27-alpine` | Reverse proxy. Serves `/` from the shared volume, proxies `/api/*` → backend | `unless-stopped` |
+| `nginx` | `nginx:1.30-alpine` | Reverse proxy. Serves `/` from the shared volume, proxies `/api/*` → backend | `unless-stopped` |
 
 Startup ordering is expressed via compose `depends_on`:
 
