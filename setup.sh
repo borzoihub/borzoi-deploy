@@ -582,7 +582,7 @@ fi
 cat <<EOF
 
 ============================================================
-Borzoi admin login (save this — shown only once):
+Voltini admin login (save this — shown only once):
   URL:      $BORZOI_BASE_URL
   Email:    $BORZOI_ADMIN_EMAIL
   Password: $BORZOI_ADMIN_PASSWORD
