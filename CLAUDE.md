@@ -53,7 +53,7 @@ catalogue of Hubs.
 ### Repositories
 
 **Central (cloud, Digistrada-hosted)**
-- `voltini.energy` — Marketing site + installer portal UI.
+- `voltini.energy-frontend` — Marketing site + installer portal UI.
 - `voltini.energy-backend` — Installer/installation catalogue, SSO minter.
 - `voltini.energy-common` — Central-side shared models.
 
