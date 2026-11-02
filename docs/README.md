@@ -20,13 +20,13 @@ For each new customer Pi you deploy:
 
 ## Simulation nodes
 
-8. **[Sim nodes](sim-nodes.md)** — install a simulation worker (`BORZOI_MODE=sim`), its OTA flow, and publishing the multi-arch image
+7. **[Sim nodes](sim-nodes.md)** — install a simulation worker (`BORZOI_MODE=sim`), its OTA flow, and publishing the multi-arch image
 
 ## Operations
 
-6. **[Updating](updating.md)** — roll out a new release, pin a version, roll back
-7. **[Connection key](connection-key.md)** — the Hub's one credential for Voltini: installing it, replacing it safely on a live site, blocking a leaked one, and enabling cloud backups
-8. **[Troubleshooting](troubleshooting.md)** — diagnosing common problems
+8. **[Updating](updating.md)** — roll out a new release, pin a version, roll back
+9. **[Connection key](connection-key.md)** — the Hub's one credential for Voltini: installing it, replacing it safely on a live site, blocking a leaked one, and enabling cloud backups
+10. **[Troubleshooting](troubleshooting.md)** — diagnosing common problems
 
 ## Quick reference
 

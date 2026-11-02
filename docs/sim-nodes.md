@@ -4,7 +4,7 @@ A **sim node** turns any Docker host into a distributed simulation worker for
 the Voltini job queue. It is the same `borzoi-backend` image as a customer Hub,
 run in `BORZOI_MODE=sim` — a pure outbound job-queue worker
 (`borzoi-backend/src/sim-server.ts`): no database, no scheduler, no inbound HTTP
-except a local `/healthz` probe. It long-polls the central coordinator
+except the loopback [fleet ops routes](#fleet-ops-routes). It long-polls the central coordinator
 (`voltini.energy-backend`) over outbound HTTPS, runs simulation jobs, and
 appears on the installer portal's **Background jobs** page.
 
@@ -141,6 +141,14 @@ registry-login → pull → recreate sequence, same `status.json`. Only two thin
 Trigger updates from the Background jobs page: a node whose reported version is
 behind the latest published image shows as outdated, with an **Update** button.
 
+On the node itself, two host-run scripts cover the same ground:
+
+```bash
+./checksimver.sh          # running version vs the registry's latest (read-only)
+./update-sim.sh           # pull + recreate `sim`, only if the image changed
+./update-sim.sh --force   # recreate anyway — unsticks a node parked on an OTA upgrade
+```
+
 ---
 
 ## Operator: publishing a multi-arch image
@@ -158,10 +166,10 @@ npm version patch
 git push --follow-tags   # CI builds amd64 + arm64 and publishes
 ```
 
-`docker:buildx` runs
-`docker buildx build --platform linux/amd64,linux/arm64 … --push` — a multi-arch
-build must `--push` the manifest directly (it cannot `--load` into the local
-daemon). The Pi keeps pulling the arm64 variant from the same manifest; x86 sim
+Built by hand, a multi-arch image is
+`docker buildx build --platform linux/amd64,linux/arm64 … --push` — it must
+`--push` the manifest directly (it cannot `--load` into the local daemon; the
+backend's `npm run docker:build:sim` builds a single-arch local image only). The Pi keeps pulling the arm64 variant from the same manifest; x86 sim
 nodes pull amd64 automatically.
 
 **Prerequisite — a buildx builder that supports multiple platforms.** The

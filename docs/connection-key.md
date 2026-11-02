@@ -46,10 +46,12 @@ nyckel*). It is shown once. Then, on the Pi:
 cd /opt/borzoi
 ./scripts/set-hub-secret.sh          # prompts, hidden input
 ./scripts/set-hub-secret.sh --check  # report state, change nothing
+VOLTINI_HUB_SECRET=vhs_… ./scripts/set-hub-secret.sh --from-env   # non-interactive
 ```
 
-The script validates the format, backs up `.env`, writes the key, confirms it
-against central, and restarts only the services that read it. A failed
+The script validates the format (`vhs_<installationId>_<random>`), backs up
+`.env`, writes the key together with `VOLTINI_INSTALLATION_ID` taken from it,
+confirms it against central, and restarts only `db-backup` if it is running. A failed
 confirmation restores the backup, so a mistyped key leaves the Hub exactly as it
 was.
 
@@ -91,9 +93,11 @@ Blocking first is what makes the old key useless.
 Off unless enabled. A Hub without a key keeps using the local-only
 `scripts/db-backup.sh`.
 
+`set-hub-secret.sh` already wrote `VOLTINI_INSTALLATION_ID` (the id embedded in
+the key, also its S3 key prefix). Add the profile to `.env`:
+
 ```dotenv
 COMPOSE_PROFILES=cloud-backup
-VOLTINI_INSTALLATION_ID=<this Hub's id — also its S3 key prefix>
 ```
 
 ```bash

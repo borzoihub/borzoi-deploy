@@ -62,9 +62,11 @@ cd /opt/borzoi
 ./setup.sh
 ```
 
-`setup.sh` is interactive. It will prompt for the domain, the **registry pull
-token**, and an admin email. It auto-generates the DB password, JWT secret and
-bootstrap admin password.
+`setup.sh` is interactive. It prompts for the **registry pull token** (and its
+username), the bootstrap admin email, and an optional Cloudflare Tunnel token
+(plus an optional Cloudflare API token to create the routes and DNS). It
+auto-generates the DB password, JWT secret and bootstrap admin password, and
+installs a nightly local database backup cron job (02:00).
 
 Afterwards, install this Hub's connection key:
 
@@ -88,9 +90,12 @@ stored anywhere.
 
 ```bash
 cd /opt/borzoi
-docker compose pull
-docker compose up -d
+./update.sh          # backup → git pull → registry login → pull → up -d
 ```
+
+Or bare: `docker compose pull && docker compose up -d`. Installers can also
+trigger the same update remotely from the installer portal (OTA, see
+[docs/updating.md](docs/updating.md)).
 
 The backend runs schema migrations on boot, so schema upgrades are
 applied automatically. The `frontend` one-shot refreshes the static
@@ -102,7 +107,7 @@ files in the shared nginx volume.
 
 ```bash
 cd /opt/borzoi
-# edit .env — set BACKEND_TAG=v1.4.2 (and/or FRONTEND_TAG=v1.4.2)
+# edit .env — set BACKEND_TAG=1.4.2 (and/or FRONTEND_TAG; versions are independent)
 docker compose up -d
 ```
 
@@ -112,7 +117,7 @@ Reverse the pin:
 
 ```bash
 cd /opt/borzoi
-# edit .env — set BACKEND_TAG=v1.4.1 (the previous good version)
+# edit .env — set BACKEND_TAG=1.4.1 (the previous good version)
 docker compose up -d
 ```
 
@@ -131,6 +136,11 @@ There is no Let's Encrypt / certbot wiring in the docker-compose stack.
 For the legacy direct-internet setup (not recommended), see [docs/tls.md](docs/tls.md).
 
 ## Backup
+
+`scripts/db-backup.sh` runs nightly from cron (installed by `setup.sh`) and
+writes a gzipped `pg_dump` to `data/backups/`, keeping 30 days. Off-device
+cloud backup is the `db-backup` service, enabled with the connection key — see
+[docs/connection-key.md](docs/connection-key.md#cloud-backups).
 
 The stateful data lives in two places: the postgres data volume and
 the `.env` file (contains DB password, JWT secret, admin
@@ -223,6 +233,16 @@ new one. A `503` means central has not provisioned cloud backup yet, which is
 harmless and still proves the key is valid.
 
 More detail: [docs/troubleshooting.md](docs/troubleshooting.md#registry-pull-failures).
+
+### Forgotten admin password
+
+`BORZOI_ADMIN_*` in `.env` only apply on first boot. Reset a Hub-local account
+directly against the database (postgres must be running):
+
+```bash
+./scripts/reset-admin-password.sh                 # prompts for email and password
+./scripts/reset-admin-password.sh --list          # list local accounts
+```
 
 ### Replacing or blocking a Hub's connection key
 

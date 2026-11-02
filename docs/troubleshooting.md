@@ -14,23 +14,24 @@ Common problems and their fixes, grouped by symptom.
   docker compose exec postgres psql -U borzoi -d borzoi -c 'SELECT email FROM "user";'
   ```
   If the table is empty, edit `.env` to set both vars, then `docker compose restart backend` — bootstrap-admin runs on every boot and is a no-op only when at least one user exists.
-- **Admin already existed** — bootstrap-admin is idempotent. If a user was created in a previous install and data was preserved across rebuilds, the old password still applies. Recover by logging in with the old creds, or reset directly in the DB:
-  ```sql
-  -- Inside postgres:
-  UPDATE "user" SET password = '<new-bcrypt-hash>' WHERE email = 'admin@...';
+- **Admin already existed** — bootstrap-admin is idempotent. If a user was created in a previous install and data was preserved across rebuilds, the old password still applies. Recover by logging in with the old creds, or reset it on the box (no email, works offline; postgres must be running):
+  ```bash
+  ./scripts/reset-admin-password.sh --list            # show local accounts
+  ./scripts/reset-admin-password.sh admin@acme.example
   ```
-  Generate the bcrypt hash with rounds=10 (use any bcrypt CLI or a one-liner).
 
 ## Backend logs "waiting for required settings"
 
 ### Symptom
 ```
-[scheduler] scheduler: waiting for required settings (installation, battery, heating, deviceConfig)
-[flowtemp] flowtemp: waiting for required settings (heating, deviceConfig.heatpumpOutdoorTemp)
+[scheduler] scheduler: waiting for required settings (installation, battery, deviceConfig)
+[scheduler] scheduler: waiting for required settings (battery config (missing device bindings), peak config (missing device bindings))
 ```
 
 ### Cause
-**This is normal on a fresh install.** The scheduler, flow-temp regulator, and ingestion services self-skip every tick until the required settings exist in the DB. Once you fill them in via the UI, the next tick (≤60s later) picks them up and activates the subsystem.
+**This is normal on a fresh install.** The scheduler skips every tick until the settings it needs exist in the DB, logging at most once a minute; once you fill them in via the UI, the next tick (≤60s later) picks them up. The flow-temp regulator skips silently until the heating settings exist.
+
+The scheduler needs the `installation`, `battery` and `device_config` settings (`heating` and `ev_charging` are optional), and `device_config` must bind the devices battery control and peak management read: `batteryLevel`, `gridPower` and `houseConsumption`.
 
 If you've already filled in all settings via the UI and the messages persist, check:
 
@@ -38,13 +39,11 @@ If you've already filled in all settings via the UI and the messages persist, ch
 docker compose exec postgres psql -U borzoi -d borzoi -c 'SELECT key FROM settings;'
 ```
 
-You should see rows for `installation`, `battery`, `heating`, `ev_charging`, `spot_prices`, `device_config`. Missing ones are what the scheduler is waiting for.
-
-If `device_config` is there but the scheduler still complains, inspect it:
+A missing `installation`, `battery` or `device_config` row is what the first message lists. If the second message appears, inspect the bindings:
 ```sql
 SELECT value FROM settings WHERE key = 'device_config';
 ```
-Look for nullable fields (e.g. `gridPower`, `solarPower`, `batteryLevel`) — these must be set to actual device IDs.
+`batteryLevel`, `gridPower` and `houseConsumption` must each point at a device (`deviceId` set).
 
 ## Registry pull failures
 
@@ -139,19 +138,14 @@ QueryFailedError: relation "tariffs" does not exist
 ```
 
 ### Cause
-The backend runs init SQL (hypertables), entity sync, and typeorm migrations in that order. If entity sync was disabled (`BORZOI_ALLOW_SYNC_IN_PROD` unset and `NODE_ENV=production`), entity tables were never created.
+The whole schema, including the initial one, is created by typeorm migrations at backend boot (`initMigrations`). Entity auto-sync is off unless `DB_SYNCHRONIZE=true`; `BORZOI_ALLOW_SYNC_IN_PROD` is not read by the backend and changes nothing. A missing relation means a migration failed or has not run yet.
 
 ### Fix
 
-Check `.env`:
-```bash
-grep BORZOI_ALLOW_SYNC_IN_PROD /opt/borzoi/.env
-```
-
-Should be `BORZOI_ALLOW_SYNC_IN_PROD=true`. If missing or `false`, add / flip it and restart:
+Find the failing migration in the boot log, fix its cause, and restart the backend — pending migrations run again on every boot:
 
 ```bash
-echo "BORZOI_ALLOW_SYNC_IN_PROD=true" >> /opt/borzoi/.env
+docker compose logs backend | grep -i -A5 migration
 docker compose up -d backend
 ```
 
@@ -263,7 +257,7 @@ cd /opt/borzoi
   docker compose logs --tail=50 nginx
   echo
   echo "=== .env (secrets redacted) ==="
-  grep -v -E 'PASSWORD|SECRET|KEY' .env
+  grep -v -E 'PASSWORD|SECRET|KEY|TOKEN' .env
 ) > /tmp/borzoi-support.log
 ```
 

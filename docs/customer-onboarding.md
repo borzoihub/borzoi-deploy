@@ -13,11 +13,12 @@ Create the installation in the installer portal first — it assigns the numeric
 installation id that everything else keys off, including the S3 prefix its
 backups land under.
 
-## 2. Choose a hostname
+## 2. Note the hostname
 
-Pick a short, URL-safe identifier (e.g. `joakim`, `forsmark`, `acme`). The public
-hostname is `<installation-id>.voltini.cloud`. Naming convention and reserved
-subdomains: [cloudflare-tunnel.md](cloudflare-tunnel.md).
+Central generates the installation's public hostname when it is created
+(`<geohash>-<random>.voltini.cloud`); the installer may rename it in the portal.
+Use the one the portal shows for the tunnel's public hostname. Convention:
+[cloudflare-tunnel.md](cloudflare-tunnel.md).
 
 ## 3. Issue the connection key
 
@@ -38,7 +39,7 @@ Voltini installation credentials — KEEP SECRET
 
 Customer:         Acme Heating
 Installation ID:  42
-Public hostname:  acme.voltini.cloud
+Public hostname:  u6sc-4k2p.voltini.cloud
 Pi hardware:      Raspberry Pi 5, 8GB
 
 ─── Registry pull token (shared — same for every site) ───

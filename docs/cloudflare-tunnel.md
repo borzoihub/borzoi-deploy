@@ -4,13 +4,19 @@ The default deployment model. The Pi binds only to `127.0.0.1:8080`, and Cloudfl
 
 ## Hostname convention
 
-All installations live under `voltini.cloud` with the pattern:
+All installations live under `voltini.cloud`. Central generates the hostname
+when the installation is created in the installer portal:
 
 ```
-<installation-id>.voltini.cloud
+<4-char-geohash>-<4-char-random>.voltini.cloud
 ```
 
-The `<installation-id>` is a short, URL-safe identifier chosen during onboarding — typically the customer name or site name (e.g. `joakim.voltini.cloud`, `forsmark.voltini.cloud`). The `voltini.cloud` domain is used exclusively for installations, so there is no risk of collisions with infrastructure subdomains.
+The geohash prefix marks the rough region (~20 km cell) without leaking the
+address (`installation-hostname.helper.ts` in `voltini.energy-backend`). An
+installer may rename it afterwards; use whatever hostname the portal shows for
+the installation. The `voltini.cloud` domain is used exclusively for
+installations, so there is no risk of collisions with infrastructure
+subdomains. The examples below use `joakim.voltini.cloud`.
 
 ## Why this model
 
@@ -107,9 +113,9 @@ sudo cloudflared service install <NEW-TOKEN-HERE>
 
 ## Email links and the public URL
 
-The backend reads `BORZOI_BASE_URL` from `.env` when generating links inside outbound emails (password reset, verification). `setup.sh` defaults this to `http://localhost:8080` — fine for the current product since those email paths are dormant.
+The backend reads `BORZOI_BASE_URL` from `.env` as the redirect base for the legacy account-verification and password-reset links. The Hub sends no email (its SES stack was removed; a forgotten password is reset with `scripts/reset-admin-password.sh`), so `setup.sh`'s default `http://localhost:8080` is fine.
 
-When email features become active, edit `.env` to use the Cloudflare-tunneled URL:
+To set the Cloudflare-tunneled URL anyway, edit `.env`:
 
 ```bash
 BORZOI_DOMAIN=joakim.voltini.cloud

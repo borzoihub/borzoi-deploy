@@ -20,18 +20,22 @@ See [operator-setup.md § 3](operator-setup.md#3-publishing-images) for details.
 
 ## Pull and restart on the Pi
 
-Standard update:
+Standard update, on the Pi:
 
 ```bash
-ssh borzoi@<pi>
 cd /opt/borzoi
-docker compose pull
-docker compose up -d
+./update.sh            # add --wait right after a push: waits for CI to move :latest
 ```
+
+`update.sh` takes a pre-update backup (`scripts/db-backup.sh`, aborts if it
+fails), fast-forwards the bundle with `git pull --ff-only`, logs in to `ghcr.io`
+with `GHCR_TOKEN`, pulls `postgres backend frontend nginx`, tags the backend
+image with its version, runs `docker compose up -d` and restarts nginx. The bare
+equivalent is `docker compose pull && docker compose up -d`.
 
 What happens:
 - `postgres` is untouched (data preserved)
-- `backend` recreates with the new image. On boot: runs migrations, bootstrap-admin is a no-op (user exists), schema-sync adds any new entity columns (opt-in mode), scheduler restarts
+- `backend` recreates with the new image. On boot: runs migrations, bootstrap-admin is a no-op (user exists), scheduler restarts
 - `frontend` one-shot recreates, copies fresh static files into the shared volume
 - `nginx` picks up the new static files on next request
 
@@ -80,13 +84,15 @@ docker compose build updater && docker compose up -d updater
 
 ## Pin a specific version
 
-By default both `BACKEND_TAG` and `FRONTEND_TAG` in `.env` are `latest`. To pin:
+By default both `BACKEND_TAG` and `FRONTEND_TAG` in `.env` are `latest`. CI
+publishes every promoted image as `:latest` and `:<package.json version>` (no
+`v` prefix); backend and frontend versions are independent. To pin:
 
 ```bash
 cd /opt/borzoi
 # Edit .env
-BACKEND_TAG=v1.4.2
-FRONTEND_TAG=v1.4.2
+BACKEND_TAG=1.4.2
+FRONTEND_TAG=1.4.2
 # Save, then:
 docker compose up -d
 ```
@@ -100,8 +106,8 @@ Point back at the previous tag:
 ```bash
 cd /opt/borzoi
 # Edit .env
-BACKEND_TAG=v1.4.1
-FRONTEND_TAG=v1.4.1
+BACKEND_TAG=1.4.1
+FRONTEND_TAG=1.4.1
 # Save, then:
 docker compose up -d
 ```
@@ -113,7 +119,9 @@ docker compose up -d
 
 ## Backup before updating
 
-A full backup captures everything needed to recreate the install:
+`update.sh` and the OTA updater already dump the database to `data/backups/`
+before pulling, and a cron job installed by `setup.sh` does the same nightly at
+02:00 (30-day retention). A full manual backup:
 
 ```bash
 cd /opt/borzoi

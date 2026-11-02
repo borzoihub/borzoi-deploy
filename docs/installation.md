@@ -26,7 +26,7 @@ End-to-end walkthrough from blank SD card to a working Borzoi login.
 **Cloudflare Tunnel** (optional but recommended):
 - A Zero Trust account (free tier is fine — https://one.dash.cloudflare.com)
 - A tunnel created in Networks → Tunnels → Create, with its connector token
-- A public hostname configured on that tunnel: `<installation-id>.voltini.cloud` → `http://localhost:8080`
+- A public hostname configured on that tunnel: the installation's hostname from the portal (`<geohash>-<random>.voltini.cloud`) → `http://localhost:8080`
 - See [cloudflare-tunnel.md](cloudflare-tunnel.md) for the naming convention
 
 ## Step 1 — Flash Raspberry Pi OS
@@ -114,13 +114,20 @@ cd /opt/borzoi
 
 ### Running setup.sh
 
+Before the prompts, `setup.sh` offers to expand the root partition to the
+whole SD card, turns Wi-Fi power save off, and points the network profiles at
+public DNS resolvers (flaky router DNS breaks image pulls).
+
 You'll be prompted for the following, in order:
 
 | Prompt | What to enter | From credentials packet |
 |---|---|---|
-| `Registry pull token` | the `read:packages` PAT from the credentials packet | yes |
+| `Registry username (machine account)` | press Enter for the default `voltini-autobot` | yes |
+| `Registry token` | the `read:packages` PAT from the credentials packet | yes |
 | `Bootstrap admin email` | e.g. `admin@acme.example` | yes |
 | `Cloudflare Tunnel token` | paste either the full `sudo cloudflared service install <token>` line or just the `eyJ...` token — setup.sh extracts it either way. Leave empty to configure later. | yes or skip |
+| `Cloudflare API token` | only asked when a tunnel token was given: a token with *Cloudflare Tunnel:Edit* + *DNS:Edit*, to create the routes and DNS records for you. Leave empty to configure them in the Zero Trust dashboard. | no |
+| `Public hostname for this Hub` | only asked when an API token was given, e.g. `pilot1.voltini.cloud` | no |
 
 The registry token is the same for every site; the **connection key is not** and
 is installed separately in step 8b below.
@@ -132,20 +139,21 @@ is installed separately in step 8b below.
 
 What happens after the prompts:
 
-1. **Registry login verified** — `docker login ghcr.io` with the supplied token. If it fails, you can re-enter.
+1. **Registry login verified** — `docker login ghcr.io` with the supplied token, right after the token prompt. If it fails, `setup.sh` exits; run it again.
 2. **Secret generation** — DB password (32 chars), JWT secret (48 chars), bootstrap admin password (24 chars) are auto-generated.
 3. **.env written** to `/opt/borzoi/.env`, mode 600.
-4. **Directories created** — `data/postgres`, `data/backups`, `nginx/templates`.
+4. **Directories created** — `data/postgres`, `data/backups`, `data/upgrade`, `nginx/templates`.
 5. **Images pulled** — `docker compose pull`.
 6. **Stack brought up** — `docker compose up -d`. Binds to `127.0.0.1:8080`.
-7. **Cloudflare Tunnel enrolled** (if a token was provided) — installs `cloudflared` via apt, runs `cloudflared service install <token>`, starts as a systemd service.
+7. **Nightly backup cron installed** — `scripts/db-backup.sh` at 02:00, dumps to `data/backups/`.
+8. **Cloudflare Tunnel enrolled** (if a token was provided) — installs `cloudflared` via apt, runs `cloudflared service install <token>`, starts as a systemd service. With an API token it also creates the routes `<hostname>` → `http://localhost:8080` and `ssh-<hostname>` → `ssh://127.0.0.1:22`, plus their DNS records.
 
 At the end, the admin credentials are printed **once**:
 
 ```
 ============================================================
-Admin login (save this — shown only once):
-  URL:      https://acme.voltini.cloud
+Voltini admin login (save this — shown only once):
+  URL:      http://localhost:8080
   Email:    admin@acme.example
   Password: aB3-Kf9s-VxLm-...
 ============================================================
@@ -198,7 +206,7 @@ Via the Borzoi UI, enter:
 - Heating settings (max/min flow temp, curve parameters)
 - Spot price settings (tariff, pricing area)
 - EV charging settings (if applicable)
-- Device configuration (map smart-meter, inverter, EV charger, heat pump to the discovered Homey / HA / SmartThings devices)
+- Device configuration (map smart-meter, inverter, EV charger, heat pump to the discovered Homey / Home Assistant devices, or to Modbus TCP devices added under Settings → Devices)
 
 Within 60 seconds of saving the last required setting, the scheduler, flow-temp regulator, and ingestion services activate automatically. No restart required. The "waiting for required settings" log messages stop.
 
