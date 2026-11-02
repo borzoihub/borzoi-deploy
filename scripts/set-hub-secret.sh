@@ -182,7 +182,7 @@ Done. Next:
   - Confirm the portal shows a recent "last used" for installation
     ${SECRET_INSTALLATION_ID} — that is how you know this Hub has really adopted
     the credential.
-  - To enable cloud backups, set BACKUP_S3_BUCKET and add 'cloud-backup' to
+  - To enable cloud backups, add 'cloud-backup' to
     COMPOSE_PROFILES, then: docker compose up -d db-backup
 
 Note: this secret has nothing to do with pulling images. That uses GHCR_TOKEN

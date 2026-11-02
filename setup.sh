@@ -384,8 +384,6 @@ cat > .env <<EOF
 REGISTRY=$REGISTRY
 GHCR_USER=$GHCR_USER
 GHCR_TOKEN=$GHCR_TOKEN
-BACKEND_TAG=latest
-FRONTEND_TAG=latest
 
 # OTA updater sidecar — needs the install dir as an absolute host path
 # (compose interpolates it; the updater mounts the project at its real host
@@ -428,10 +426,6 @@ VOLTINI_BROKER_URL=https://api.voltini.energy/api/hub/credentials
 
 # Cloud backup — inert until COMPOSE_PROFILES contains 'cloud-backup'.
 COMPOSE_PROFILES=
-BACKUP_S3_BUCKET=
-BACKUP_AWS_REGION=eu-north-1
-BACKUP_SCHEDULE=0 2 * * *
-BACKUP_RETENTION_DAYS=14
 
 EOF
 chmod 600 .env

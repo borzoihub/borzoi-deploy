@@ -120,7 +120,7 @@ services:
       DB_USER: ${DB_USER}
       DB_PASSWORD: ${DB_PASSWORD}
       BACKUP_DATABASES: ${DB_NAME}
-      BACKUP_S3_BUCKET: ${BACKUP_S3_BUCKET}
+      BACKUP_S3_BUCKET: voltini-hub-backups
       # Every key this Hub writes lives under its own installation id — the
       # prefix the brokered session policy pins it to. A mismatch here means
       # every upload fails with AccessDenied, which is the correct failure.

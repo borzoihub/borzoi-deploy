@@ -247,7 +247,6 @@ COMPOSE_FILE=$COMPOSE_FILE_SIM
 REGISTRY=$REGISTRY
 GHCR_USER=$GHCR_USER
 GHCR_TOKEN=$GHCR_TOKEN
-BACKEND_TAG=latest
 
 # OTA updater sidecar — absolute host paths (compose interpolates these; the
 # updater mounts the project at its real host path so relative bind mounts and

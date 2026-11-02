@@ -93,7 +93,6 @@ Off unless enabled. A Hub without a key keeps using the local-only
 
 ```dotenv
 COMPOSE_PROFILES=cloud-backup
-BACKUP_S3_BUCKET=<the Voltini backup bucket>
 VOLTINI_INSTALLATION_ID=<this Hub's id — also its S3 key prefix>
 ```
 
