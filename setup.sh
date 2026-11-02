@@ -426,7 +426,6 @@ VOLTINI_BROKER_URL=https://api.voltini.energy/api/hub/credentials
 
 # Cloud backup — inert until COMPOSE_PROFILES contains 'cloud-backup'.
 COMPOSE_PROFILES=
-BACKUP_RETENTION_DAYS=14
 
 EOF
 chmod 600 .env
