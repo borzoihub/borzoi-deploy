@@ -384,7 +384,6 @@ cat > .env <<EOF
 REGISTRY=$REGISTRY
 GHCR_USER=$GHCR_USER
 GHCR_TOKEN=$GHCR_TOKEN
-FRONTEND_TAG=latest
 
 # OTA updater sidecar — needs the install dir as an absolute host path
 # (compose interpolates it; the updater mounts the project at its real host
