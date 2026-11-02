@@ -384,7 +384,6 @@ cat > .env <<EOF
 REGISTRY=$REGISTRY
 GHCR_USER=$GHCR_USER
 GHCR_TOKEN=$GHCR_TOKEN
-BACKEND_TAG=latest
 FRONTEND_TAG=latest
 
 # OTA updater sidecar — needs the install dir as an absolute host path
