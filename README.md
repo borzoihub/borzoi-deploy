@@ -244,6 +244,12 @@ directly against the database (postgres must be running):
 ./scripts/reset-admin-password.sh --list          # list local accounts
 ```
 
+### Rotating the JWT secret
+
+To replace `JWT_SECRET` without signing anyone out, follow theworks-be
+[`docs/JWT_ROTATION.md`](https://github.com/digistrada/theworks-be/blob/main/docs/JWT_ROTATION.md).
+It uses `JWT_PREVIOUS_SECRET` and `JWT_PREVIOUS_SECRET_RETIRED_AT` in `.env`.
+
 ### Replacing or blocking a Hub's connection key
 
 Both are portal actions — see
